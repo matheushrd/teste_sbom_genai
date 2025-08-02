@@ -1,9 +1,15 @@
 name: GenAI Security Auto-Remediation (Configurável)
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 4 * * 1'
+  pull_request:
+    # O branch que está recebendo o Pull Request
+    branches:
+      - 'main'
+    # Tipos de evento que acionam o workflow
+    # 'opened': quando o PR é aberto
+    # 'synchronize': quando novos commits são adicionados ao PR
+    types: [opened, synchronize]
+
 
 permissions:
   contents: write
