@@ -41,16 +41,18 @@ jobs:
           pip freeze > bom.txt  # cria ./app/bom.txt
 
 
-      - name: 5. Escanear SBOM com Trivy
+      - name: 5. Escanear dependências com Trivy (modo filesystem)
         id: trivy_scan
         uses: aquasecurity/trivy-action@master
         with:
-          input: 'app/bom.txt'
+          scan-type: 'fs'
+          scan-ref: './app'
           format: 'json'
           output: 'trivy-results.json'
           severity: 'HIGH,CRITICAL'
           ignore-unfixed: true
           continue-on-error: true
+
 
       - name: 6. Gemini sugere e aplica a correção
         id: genai_fix
