@@ -1,53 +1,47 @@
-name: GenAI Security Auto-Remediation on PR
+name: Post-Merge Security Remediation
 
 on:
-  pull_request:
+  push:
     branches: ['main']
-    types: [opened, synchronize]
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
-  scan-and-remediate:
+  post-merge-scan:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: ./app
 
     steps:
-      - name: 1. Checkout do código-fonte
+      - name: Checkout da branch main
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: 2. Ler configuração do pipeline
+      - name: Ler configuração do pipeline
         id: config
         run: |
           echo "python_version=$(yq '.python_version' ../ci_config.yml)" >> "$GITHUB_OUTPUT"
           echo "requirements_file=$(yq '.requirements_files[0]' ../ci_config.yml)" >> "$GITHUB_OUTPUT"
           echo "test_requirements_file=$(yq '.requirements_files[1]' ../ci_config.yml)" >> "$GITHUB_OUTPUT"
 
-      - name: 3. Setup do ambiente Python
+      - name: Setup do Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ steps.config.outputs.python_version }}
           cache: 'pip'
           cache-dependency-path: app/${{ steps.config.outputs.requirements_file }}
 
-      - name: 4. Instalar dependências e gerar SBOM real
+      - name: Instalar dependências
         run: |
           pip install -r ${{ steps.config.outputs.requirements_file }}
-          pip freeze > bom.txt  # cria ./app/bom.txt
-
-      - name: 4.5 Rodar testes antes da verificação
-        run: |
           pip install -r ${{ steps.config.outputs.test_requirements_file }}
-          pytest tests/
 
+      - name: Executar testes na main
+        run: pytest tests/
 
-
-      - name: 5. Escanear dependências com Trivy (modo filesystem)
+      - name: Rodar Trivy após merge
         id: trivy_scan
         uses: aquasecurity/trivy-action@master
         with:
@@ -59,8 +53,7 @@ jobs:
           ignore-unfixed: true
           continue-on-error: true
 
-
-      - name: 6. Gemini sugere e aplica a correção
+      - name: Gerar correção com Gemini
         id: genai_fix
         if: steps.trivy_scan.outcome == 'failure'
         env:
@@ -68,7 +61,7 @@ jobs:
           REQUIREMENTS_FILE_PATH: app/${{ steps.config.outputs.requirements_file }}
         run: |
           pip install google-generativeai
-          python - << 'EOF'
+          python << 'EOF'
           import os, json, google.generativeai as genai, subprocess
 
           requirements_path = os.environ["REQUIREMENTS_FILE_PATH"]
@@ -77,7 +70,7 @@ jobs:
               vulnerability = data[0]['Vulnerabilities'][0]
               pkg_name, installed_version, cve_id = vulnerability['PkgName'], vulnerability['InstalledVersion'], vulnerability['VulnerabilityID']
               print(f"Vulnerabilidade encontrada: {cve_id} em {pkg_name}=={installed_version}")
-          except (IOError, IndexError, KeyError):
+          except Exception as e:
               print("Nenhuma vulnerabilidade crítica encontrada."); exit(0)
 
           original_req_line = ""
@@ -98,24 +91,24 @@ jobs:
 
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f"commit_message=fix(bot): upgrade {pkg_name} to remediate {cve_id}\n")
+              f.write(f"pkg_name={pkg_name}\n")
+              f.write(f"cve_id={cve_id}\n")
           EOF
 
-      - name: 7. Instalar dependências corrigidas e de teste
-        id: tests
+      - name: Validar correção com testes
         if: steps.genai_fix.outputs.commit_message != ''
         run: |
-          echo "Instalando dependências corrigidas..."
           pip install -r ${{ steps.config.outputs.requirements_file }}
-          echo "Instalando dependências de teste..."
           pip install -r ${{ steps.config.outputs.test_requirements_file }}
-          echo "Rodando a suíte de testes..."
           pytest tests/
 
-      - name: 8. Commitar e Empurrar a Correção para o PR
-        if: steps.tests.outcome == 'success'
-        run: |
-          git config --global user.name 'GenAI Security Bot'
-          git config --global user.email 'bot@users.noreply.github.com'
-          git commit -am "${{ steps.genai_fix.outputs.commit_message }}"
-          git push
-        working-directory: .
+      - name: Criar novo PR com correção
+        if: success()
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "${{ steps.genai_fix.outputs.commit_message }}"
+          title: "fix(bot): update ${{ steps.genai_fix.outputs.pkg_name }} to fix ${{ steps.genai_fix.outputs.cve_id }}"
+          body: |
+            Detecção automática pós-merge: a biblioteca `${{ steps.genai_fix.outputs.pkg_name }}` foi atualizada para mitigar `${{ steps.genai_fix.outputs.cve_id }}`
+          branch: "auto/remediation-${{ github.run_id }}"
