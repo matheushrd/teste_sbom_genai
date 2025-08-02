@@ -1,0 +1,10 @@
+# Arquivo de configuração para o pipeline de CI/CD
+
+# Versão do Python a ser utilizada nos jobs do GitHub Actions
+python_version: '3.10'
+
+# Lista de arquivos de dependências a serem instalados e escaneados
+# Pode ser um ou mais arquivos.
+requirements_files:
+  - 'requirements.txt'
+  # - 'requirements-dev.txt' # Exemplo se você tivesse mais de um
