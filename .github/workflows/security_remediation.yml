@@ -2,8 +2,7 @@ name: GenAI Security Auto-Remediation on PR
 
 on:
   pull_request:
-    branches:
-      - 'main'
+    branches: ['main']
     types: [opened, synchronize]
 
 permissions:
@@ -12,7 +11,6 @@ permissions:
 jobs:
   scan-and-remediate:
     runs-on: ubuntu-latest
-    # Define o diretório de trabalho padrão para todos os passos deste job
     defaults:
       run:
         working-directory: ./app
@@ -25,32 +23,28 @@ jobs:
 
       - name: 2. Ler configuração do pipeline
         id: config
-        uses: mikefarah/yq@v4
-        with:
-          # O arquivo de config está na raiz, então não usamos working-directory aqui
-          python_version: 'cat ci_config.yml | yq .python_version'
-          requirements_file: 'cat ci_config.yml | yq .requirements_files[0]'
-          test_requirements_file: 'cat ci_config.yml | yq .requirements_files[1]'
+        run: |
+          echo "python_version=$(yq '.python_version' ../ci_config.yml)" >> "$GITHUB_OUTPUT"
+          echo "requirements_file=$(yq '.requirements_files[0]' ../ci_config.yml)" >> "$GITHUB_OUTPUT"
+          echo "test_requirements_file=$(yq '.requirements_files[1]' ../ci_config.yml)" >> "$GITHUB_OUTPUT"
 
       - name: 3. Setup do ambiente Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ steps.config.outputs.python_version }}
           cache: 'pip'
-          # O cache precisa saber onde está o requirements.txt
           cache-dependency-path: app/${{ steps.config.outputs.requirements_file }}
 
       - name: 4. Instalar dependências e gerar SBOM real
         run: |
           pip install -r ${{ steps.config.outputs.requirements_file }}
-          pip freeze > bom.txt
+          pip freeze > app/bom.txt
           echo "SBOM gerado a partir de ${{ steps.config.outputs.requirements_file }}"
 
       - name: 5. Escanear SBOM com Trivy
         id: trivy_scan
         uses: aquasecurity/trivy-action@master
         with:
-          # O Trivy precisa saber onde está o bom.txt
           input: 'app/bom.txt'
           format: 'json'
           output: 'trivy-results.json'
@@ -63,15 +57,12 @@ jobs:
         if: steps.trivy_scan.outcome == 'failure'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # O caminho do arquivo agora precisa incluir o diretório 'app'
           REQUIREMENTS_FILE_PATH: app/${{ steps.config.outputs.requirements_file }}
         run: |
-          # Não precisa de working-directory aqui, pois o script Python já recebe o caminho completo
           pip install google-generativeai
           python - << 'EOF'
-          # O script Python interno não precisa de nenhuma alteração.
-          # Ele já usa a variável de ambiente REQUIREMENTS_FILE_PATH com o caminho completo.
           import os, json, google.generativeai as genai, subprocess
+
           requirements_path = os.environ["REQUIREMENTS_FILE_PATH"]
           try:
               with open('trivy-results.json', 'r') as f: data = json.load(f)
@@ -80,25 +71,30 @@ jobs:
               print(f"Vulnerabilidade encontrada: {cve_id} em {pkg_name}=={installed_version}")
           except (IOError, IndexError, KeyError):
               print("Nenhuma vulnerabilidade crítica encontrada."); exit(0)
+
           original_req_line = ""
           with open(requirements_path, 'r') as f:
               for line in f:
                   if line.strip().startswith(pkg_name): original_req_line = line.strip(); break
-          if not original_req_line: print(f"Biblioteca {pkg_name} não encontrada."); exit(1)
+          if not original_req_line:
+              print(f"Biblioteca {pkg_name} não encontrada."); exit(1)
+
           prompt = f"Analisando um projeto Python, a vulnerabilidade '{cve_id}' foi encontrada na biblioteca '{pkg_name}', versão '{installed_version}'. O arquivo '{requirements_path}' original contém a linha: '{original_req_line}'. Qual é a menor atualização de versão para '{pkg_name}' que corrige essa falha e respeita a regra de versionamento original? Responda APENAS com a nova linha para o arquivo de requirements."
           genai.configure(api_key=os.environ["GEMINI_API_KEY"])
           model = genai.GenerativeModel('gemini-1.5-pro-latest')
           response = model.generate_content(prompt)
           corrected_line = response.text.strip()
           print(f"Gemini sugeriu a correção: '{corrected_line}'")
+
           subprocess.run(["sed", "-i", f"s|{original_req_line}|{corrected_line}|g", requirements_path])
+
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-            print(f"commit_message=fix(bot): upgrade {pkg_name} to remediate {cve_id}", file=f)
+              f.write(f"commit_message=fix(bot): upgrade {pkg_name} to remediate {cve_id}\n")
           EOF
 
       - name: 7. Instalar dependências corrigidas e de teste
         id: tests
-        if: steps.genai_fix.outputs.commit_message
+        if: steps.genai_fix.outputs.commit_message != ''
         run: |
           echo "Instalando dependências corrigidas..."
           pip install -r ${{ steps.config.outputs.requirements_file }}
@@ -110,9 +106,8 @@ jobs:
       - name: 8. Commitar e Empurrar a Correção para o PR
         if: steps.tests.outcome == 'success'
         run: |
-          # O commit acontece na raiz, então removemos o working-directory padrão para este passo
           git config --global user.name 'GenAI Security Bot'
           git config --global user.email 'bot@users.noreply.github.com'
           git commit -am "${{ steps.genai_fix.outputs.commit_message }}"
           git push
-        working-directory: . # Reseta para o diretório raiz
+        working-directory: .
