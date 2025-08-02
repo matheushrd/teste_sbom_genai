@@ -1,48 +1,47 @@
-name: GenAI Security Auto-Remediation (Configurável)
+name: GenAI Security Auto-Remediation on PR
 
 on:
   pull_request:
-    # O branch que está recebendo o Pull Request
     branches:
       - 'main'
-    # Tipos de evento que acionam o workflow
-    # 'opened': quando o PR é aberto
-    # 'synchronize': quando novos commits são adicionados ao PR
     types: [opened, synchronize]
-
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   scan-and-remediate:
     runs-on: ubuntu-latest
-    steps:
-      # --- FASE 1: SETUP E ANÁLISE (Agora configurável) ---
+    # Define o diretório de trabalho padrão para todos os passos deste job
+    defaults:
+      run:
+        working-directory: ./app
 
+    steps:
       - name: 1. Checkout do código-fonte
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: 2. Ler configuração do pipeline
         id: config
-        uses: mikefarah/yq@v4 # Action para ler arquivos YAML
+        uses: mikefarah/yq@v4
         with:
-          # Extrai os valores do arquivo de configuração
+          # O arquivo de config está na raiz, então não usamos working-directory aqui
           python_version: 'cat ci_config.yml | yq .python_version'
-          # Pega o primeiro arquivo de requirements da lista
           requirements_file: 'cat ci_config.yml | yq .requirements_files[0]'
+          test_requirements_file: 'cat ci_config.yml | yq .requirements_files[1]'
 
       - name: 3. Setup do ambiente Python
         uses: actions/setup-python@v5
         with:
-          # Usa a versão do Python lida do arquivo de configuração
           python-version: ${{ steps.config.outputs.python_version }}
           cache: 'pip'
+          # O cache precisa saber onde está o requirements.txt
+          cache-dependency-path: app/${{ steps.config.outputs.requirements_file }}
 
       - name: 4. Instalar dependências e gerar SBOM real
         run: |
-          # Usa o caminho do arquivo de requirements lido da configuração
           pip install -r ${{ steps.config.outputs.requirements_file }}
           pip freeze > bom.txt
           echo "SBOM gerado a partir de ${{ steps.config.outputs.requirements_file }}"
@@ -51,106 +50,69 @@ jobs:
         id: trivy_scan
         uses: aquasecurity/trivy-action@master
         with:
-          input: 'bom.txt'
+          # O Trivy precisa saber onde está o bom.txt
+          input: 'app/bom.txt'
           format: 'json'
           output: 'trivy-results.json'
           severity: 'HIGH,CRITICAL'
           ignore-unfixed: true
           continue-on-error: true
 
-      # --- FASE 2: GenAI (Gemini) - SUGESTÃO E CORREÇÃO ---
-
       - name: 6. Gemini sugere e aplica a correção
         id: genai_fix
         if: steps.trivy_scan.outcome == 'failure'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # Passa o nome do arquivo de requirements para o script
-          REQUIREMENTS_FILE_PATH: ${{ steps.config.outputs.requirements_file }}
+          # O caminho do arquivo agora precisa incluir o diretório 'app'
+          REQUIREMENTS_FILE_PATH: app/${{ steps.config.outputs.requirements_file }}
         run: |
+          # Não precisa de working-directory aqui, pois o script Python já recebe o caminho completo
           pip install google-generativeai
-
           python - << 'EOF'
-          import os
-          import json
-          import google.generativeai as genai
-          import subprocess
-
-          # Pega o caminho do arquivo de requirements a partir da variável de ambiente
+          # O script Python interno não precisa de nenhuma alteração.
+          # Ele já usa a variável de ambiente REQUIREMENTS_FILE_PATH com o caminho completo.
+          import os, json, google.generativeai as genai, subprocess
           requirements_path = os.environ["REQUIREMENTS_FILE_PATH"]
-
           try:
-              with open('trivy-results.json', 'r') as f:
-                  data = json.load(f)
+              with open('trivy-results.json', 'r') as f: data = json.load(f)
               vulnerability = data[0]['Vulnerabilities'][0]
-              pkg_name = vulnerability['PkgName']
-              installed_version = vulnerability['InstalledVersion']
-              cve_id = vulnerability['VulnerabilityID']
+              pkg_name, installed_version, cve_id = vulnerability['PkgName'], vulnerability['InstalledVersion'], vulnerability['VulnerabilityID']
               print(f"Vulnerabilidade encontrada: {cve_id} em {pkg_name}=={installed_version}")
           except (IOError, IndexError, KeyError):
-              print("Nenhuma vulnerabilidade crítica encontrada.")
-              exit(0)
-
+              print("Nenhuma vulnerabilidade crítica encontrada."); exit(0)
           original_req_line = ""
           with open(requirements_path, 'r') as f:
               for line in f:
-                  if line.strip().startswith(pkg_name):
-                      original_req_line = line.strip()
-                      break
-          
-          if not original_req_line:
-              print(f"Biblioteca {pkg_name} não encontrada em {requirements_path}.")
-              exit(1)
-
-          prompt = f"""
-          Analisando um projeto Python, a vulnerabilidade '{cve_id}' foi encontrada na biblioteca '{pkg_name}', versão '{installed_version}'.
-          O arquivo '{requirements_path}' original contém a linha: '{original_req_line}'.
-          Qual é a menor atualização de versão para '{pkg_name}' que corrige essa falha e respeita a regra de versionamento original?
-          Responda APENAS com a nova linha para o arquivo de requirements.
-          """
-
+                  if line.strip().startswith(pkg_name): original_req_line = line.strip(); break
+          if not original_req_line: print(f"Biblioteca {pkg_name} não encontrada."); exit(1)
+          prompt = f"Analisando um projeto Python, a vulnerabilidade '{cve_id}' foi encontrada na biblioteca '{pkg_name}', versão '{installed_version}'. O arquivo '{requirements_path}' original contém a linha: '{original_req_line}'. Qual é a menor atualização de versão para '{pkg_name}' que corrige essa falha e respeita a regra de versionamento original? Responda APENAS com a nova linha para o arquivo de requirements."
           genai.configure(api_key=os.environ["GEMINI_API_KEY"])
           model = genai.GenerativeModel('gemini-1.5-pro-latest')
           response = model.generate_content(prompt)
           corrected_line = response.text.strip()
           print(f"Gemini sugeriu a correção: '{corrected_line}'")
-
-          # Atualiza o arquivo de requirements correto
           subprocess.run(["sed", "-i", f"s|{original_req_line}|{corrected_line}|g", requirements_path])
-
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-            print(f"branch_name=fix/{cve_id}", file=f)
-            print(f"pr_title=Fix: Atualiza {pkg_name} para corrigir {cve_id}", file=f)
-            print(f"pr_body=Este PR foi gerado automaticamente pelo **Gemini** para corrigir a vulnerabilidade **{cve_id}** em `{pkg_name}`. A versão foi atualizada de `{original_req_line}` para `{corrected_line}` em `{requirements_path}`. Os testes automatizados passaram.", file=f)
-            print(f"commit_message=fix: upgrade {pkg_name} to remediate {cve_id}", file=f)
+            print(f"commit_message=fix(bot): upgrade {pkg_name} to remediate {cve_id}", file=f)
           EOF
 
-      # --- FASE 3: VALIDAÇÃO COM TESTES ---
-
-      - name: 7. Instalar dependências corrigidas e rodar testes
+      - name: 7. Instalar dependências corrigidas e de teste
         id: tests
-        if: steps.genai_fix.outputs.branch_name
+        if: steps.genai_fix.outputs.commit_message
         run: |
+          echo "Instalando dependências corrigidas..."
           pip install -r ${{ steps.config.outputs.requirements_file }}
-          pip install pytest
+          echo "Instalando dependências de teste..."
+          pip install -r ${{ steps.config.outputs.test_requirements_file }}
+          echo "Rodando a suíte de testes..."
           pytest tests/
 
-      # --- FASE 4: CRIAÇÃO DO PULL REQUEST ---
-
-      - name: 8. Criar Pull Request com a correção
+      - name: 8. Commitar e Empurrar a Correção para o PR
         if: steps.tests.outcome == 'success'
-        uses: peter-evans/create-pull-request@v6
-        with:
-          token: ${{ secrets.GH_PAT }} # Use um PAT para maior robustez
-          commit-message: ${{ steps.genai_fix.outputs.commit_message }}
-          branch: ${{ steps.genai_fix.outputs.branch_name }}
-          delete-branch: true
-          title: ${{ steps.genai_fix.outputs.pr_title }}
-          body: ${{ steps.genai_fix.outputs.pr_body }}
-          reviewers: |
-            github-username1
-          labels: |
-            security
-            autofix
-            gemini
-            dependencies
+        run: |
+          # O commit acontece na raiz, então removemos o working-directory padrão para este passo
+          git config --global user.name 'GenAI Security Bot'
+          git config --global user.email 'bot@users.noreply.github.com'
+          git commit -am "${{ steps.genai_fix.outputs.commit_message }}"
+          git push
+        working-directory: . # Reseta para o diretório raiz

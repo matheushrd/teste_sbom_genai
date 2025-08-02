@@ -1,0 +1,29 @@
+name: Setup Repository Rules
+
+# Gatilho: rode manualmente ou quando o próprio workflow for alterado
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/setup_repo_rules.yml'
+
+jobs:
+  apply-branch-protection:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply Branch Protection Rule
+        env:
+          # O GH_TOKEN tem permissões para administrar o repositório
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          # O nome do repositório (ex: 'meu-usuario/meu-repo')
+          REPO: ${{ github.repository }}
+        run: |
+          gh api \
+            --method PUT "/repos/${REPO}/branches/main/protection" \
+            --silent \
+            -f required_status_checks.strict=true \
+            -f required_status_checks.checks[0].context="scan-and-remediate" \
+            -f "required_pull_request_reviews=null" \
+            -f enforce_admins=true \
+            -f "restrictions=null"
+          echo "Regra de proteção para o branch 'main' aplicada com sucesso."
