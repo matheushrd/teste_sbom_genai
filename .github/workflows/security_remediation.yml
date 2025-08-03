@@ -67,40 +67,36 @@ jobs:
       - name: 4.3. Carregar SBOM como Artefato
         uses: actions/upload-artifact@v4
         with:
-          name: sbom-artifact # <--- O NOME É ESTE
+          name: sbom-artifact # Nome correto para o upload
           path: ./app/cyclonedx.json
 
       - name: 4.3.1. Verificar arquivos existentes
-        run: ls -R ./app |
+        # CORRIGIDO: Sintaxe correta para múltiplos comandos
+        run: |
+          echo "Verificando o conteúdo antes do upload:"
+          ls -R ./app
           cat ./app/cyclonedx.json
-
-      # - name: 5. Escanear SBOM com Trivy
-      #   id: vulerability_scan
-      #   uses: aquasecurity/trivy-action@master
-      #   with:
-      #     # A linha 'scan-ref' foi REMOVIDA.
-      #     scan-type: 'sbom'
-      #     input: './app/cyclonedx.json'
-      #     format: 'json'
-      #     output: 'trivy-results.json'
-      #     severity: 'HIGH,CRITICAL'
-      #     ignore-unfixed: true
 
       - name: 5.1. Baixar Artefato do SBOM
         uses: actions/download-artifact@v4
         with:
-          name: cyclonedx.json # <--- NOME DIFERENTE
+          # CORRIGIDO: Nome idêntico ao do upload
+          name: sbom-artifact
           path: ./app
 
-      - name: 5.1.1. Verificar arquivos existentes
-        run: ls -R ./app
+      - name: 5.1.1. Verificar arquivos existentes após download
+        run: |
+          echo "Verificando o conteúdo após o download:"
+          ls -R ./app
 
       - name: 5.2. Escanear SBOM com Grype
         id: vulerability_scan
         uses: anchore/scan-action@v6
         with:
           sbom: './app/cyclonedx.json'
-          fail-on-severity: 'medium'
+          # CORRIGIDO: Parâmetros corretos para falhar o build
+          fail-build: true
+          severity-cutoff: 'medium
           
       - name: 6. Gemini sugere e aplica a correção com OSV
         id: genai_fix
