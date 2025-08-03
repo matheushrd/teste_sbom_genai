@@ -250,57 +250,57 @@ jobs:
 
               Responda APENAS com a nova linha para o arquivo de dependências, sem explicações adicionais."""
 
-                            # Chama o Gemini
-                            genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-                            gemini_version = os.environ.get("GEMINI_VERSION", "gemini-1.5-pro-latest")
-                            model = genai.GenerativeModel(gemini_version)
-                            response = model.generate_content(prompt)
-                            corrected_line = response.text.strip().replace("`", "").replace("```", "")
-                            print(f"Gemini sugeriu a correção para {pkg_name}: '{corrected_line}'")
+              # Chama o Gemini
+              genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+              gemini_version = os.environ.get("GEMINI_VERSION", "gemini-1.5-pro-latest")
+              model = genai.GenerativeModel(gemini_version)
+              response = model.generate_content(prompt)
+              corrected_line = response.text.strip().replace("`", "").replace("```", "")
+              print(f"Gemini sugeriu a correção para {pkg_name}: '{corrected_line}'")
 
-                            # Aplica a substituição no conteúdo
-                            pattern = re.escape(original_req_line)
-                            updated_content = re.sub(f"^{pattern}$", corrected_line, updated_content, flags=re.MULTILINE)
-                            
-                            fixes_applied.append({
-                                'package': pkg_name,
-                                'original': original_req_line,
-                                'fixed': corrected_line,
-                                'cves': cve_list
-                            })
+              # Aplica a substituição no conteúdo
+              pattern = re.escape(original_req_line)
+              updated_content = re.sub(f"^{pattern}$", corrected_line, updated_content, flags=re.MULTILINE)
+              
+              fixes_applied.append({
+                  'package': pkg_name,
+                  'original': original_req_line,
+                  'fixed': corrected_line,
+                  'cves': cve_list
+              })
 
-                        # Salva o arquivo atualizado
-                        with open(requirements_path, 'w') as f:
-                            f.write(updated_content)
+          # Salva o arquivo atualizado
+          with open(requirements_path, 'w') as f:
+              f.write(updated_content)
 
-                        print(f"\nArquivo {requirements_path} atualizado!")
-                        print(f"Novo conteúdo:")
-                        print(updated_content)
+          print(f"\nArquivo {requirements_path} atualizado!")
+          print(f"Novo conteúdo:")
+          print(updated_content)
 
-                        # Gera mensagem de commit com todas as correções
-                        if fixes_applied:
-                            cve_list = []
-                            package_list = []
-                            for fix in fixes_applied:
-                                package_list.append(fix['package'])
-                                cve_list.extend(fix['cves'])
-                            
-                            packages_str = ", ".join(set(package_list))
-                            cves_str = ", ".join(set(cve_list))
-                            
-                            commit_message = f"fix(security): upgrade {packages_str} to remediate {cves_str}"
-                            
-                            with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-                                f.write(f"commit_message={commit_message}\n")
-                                f.write(f"vulnerability_fixed=true\n")
-                                f.write(f"packages_fixed={len(fixes_applied)}\n")
-                                f.write(f"vulnerabilities_fixed={len(vulnerabilities_found)}\n")
-                                
-                            print(f"Correções aplicadas: {len(fixes_applied)} pacotes, {len(vulnerabilities_found)} vulnerabilidades")
-                        else:
-                            print("Nenhuma correção foi aplicada.")
-                            exit(1)
-                        EOF
+          # Gera mensagem de commit com todas as correções
+          if fixes_applied:
+              cve_list = []
+              package_list = []
+              for fix in fixes_applied:
+                  package_list.append(fix['package'])
+                  cve_list.extend(fix['cves'])
+              
+              packages_str = ", ".join(set(package_list))
+              cves_str = ", ".join(set(cve_list))
+              
+              commit_message = f"fix(security): upgrade {packages_str} to remediate {cves_str}"
+              
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"commit_message={commit_message}\n")
+                  f.write(f"vulnerability_fixed=true\n")
+                  f.write(f"packages_fixed={len(fixes_applied)}\n")
+                  f.write(f"vulnerabilities_fixed={len(vulnerabilities_found)}\n")
+                  
+              print(f"Correções aplicadas: {len(fixes_applied)} pacotes, {len(vulnerabilities_found)} vulnerabilidades")
+          else:
+              print("Nenhuma correção foi aplicada.")
+              exit(1)
+          EOF
 
       - name: 7. Instalar dependências corrigidas e executar testes
         id: tests
