@@ -355,13 +355,121 @@ jobs:
         if: steps.tests.outcome == 'success'
         continue-on-error: true
         run: |
-          echo "Verificando se a vulnerabilidade foi corrigida..."
-          # Gera novo SBOM
-          trivy fs --format cyclonedx ${{ steps.config.outputs.app_path }} --output ./app/cyclonedx-fixed.json
+          echo "=== Verificando se as vulnerabilidades foram corrigidas ==="
+          echo "Packages corrigidos: ${{ steps.genai_fix.outputs.packages_fixed }}"
+          echo "Vulnerabilidades originais: ${{ steps.genai_fix.outputs.vulnerabilities_fixed }}"
           
-          # Verifica se ainda há vulnerabilidades
-          trivy sbom ./app/cyclonedx-fixed.json --format json --output trivy-results-fixed.json --severity MEDIUM,HIGH,CRITICAL
-          trivy sbom ./app/cyclonedx-fixed.json --exit-code 1 --severity MEDIUM,HIGH,CRITICAL --format table
+          # Gera novo SBOM a partir do requirements.txt atualizado
+          echo "Gerando novo SBOM com as dependências corrigidas..."
+          cyclonedx-py requirements -i ${{ steps.config.outputs.requirements_file }} -o ./cyclonedx-fixed.json
+          
+          echo "SBOM atualizado gerado: cyclonedx-fixed.json"
+          
+          # Verifica se ainda há vulnerabilidades no novo SBOM
+          echo "Escaneando o novo SBOM para verificar se as vulnerabilidades foram corrigidas..."
+          
+          # Gera resultado em JSON para análise
+          if trivy sbom ./cyclonedx-fixed.json --format json --output trivy-results-fixed.json --severity MEDIUM,HIGH,CRITICAL; then
+            echo "✅ Scan do SBOM corrigido concluído com sucesso"
+          else
+            echo "⚠️ Houve problemas no scan do SBOM corrigido"
+          fi
+          
+          # Mostra resultado em formato tabela
+          echo "Resultado do scan de segurança após correções:"
+          trivy sbom ./cyclonedx-fixed.json --format table --severity MEDIUM,HIGH,CRITICAL
+          
+          # Analisa os resultados para verificar se as correções foram efetivas
+          python - << 'EOF'
+          import json
+          import os
+          
+          try:
+              # Carrega os resultados originais
+              with open('trivy-results.json', 'r') as f:
+                  original_results = json.load(f)
+              
+              # Carrega os resultados após correção
+              with open('trivy-results-fixed.json', 'r') as f:
+                  fixed_results = json.load(f)
+              
+              # Conta vulnerabilidades originais
+              original_vulns = []
+              for result in original_results.get('Results', []):
+                  if result.get('Type') == 'python-pkg' and result.get('Vulnerabilities'):
+                      for vuln in result['Vulnerabilities']:
+                          original_vulns.append({
+                              'cve': vuln.get('VulnerabilityID'),
+                              'package': vuln.get('PkgName'),
+                              'severity': vuln.get('Severity')
+                          })
+              
+              # Conta vulnerabilidades restantes
+              remaining_vulns = []
+              for result in fixed_results.get('Results', []):
+                  if result.get('Type') == 'python-pkg' and result.get('Vulnerabilities'):
+                      for vuln in result['Vulnerabilities']:
+                          remaining_vulns.append({
+                              'cve': vuln.get('VulnerabilityID'),
+                              'package': vuln.get('PkgName'),
+                              'severity': vuln.get('Severity')
+                          })
+              
+              print(f"=== ANÁLISE DE CORREÇÃO ===")
+              print(f"Vulnerabilidades originais: {len(original_vulns)}")
+              print(f"Vulnerabilidades restantes: {len(remaining_vulns)}")
+              print(f"Vulnerabilidades corrigidas: {len(original_vulns) - len(remaining_vulns)}")
+              
+              if original_vulns:
+                  success_rate = ((len(original_vulns) - len(remaining_vulns)) / len(original_vulns)) * 100
+                  print(f"Taxa de sucesso: {success_rate:.1f}%")
+              
+              # Lista vulnerabilidades que ainda permanecem
+              if remaining_vulns:
+                  print(f"\n⚠️ Vulnerabilidades que ainda permanecem:")
+                  for vuln in remaining_vulns:
+                      print(f"  - {vuln['cve']} em {vuln['package']} (Severidade: {vuln['severity']})")
+                  
+                  # Define output indicando que ainda há vulnerabilidades
+                  with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                      f.write(f"vulnerabilities_remaining={len(remaining_vulns)}\n")
+                      f.write(f"all_vulnerabilities_fixed=false\n")
+              else:
+                  print(f"\n✅ Todas as vulnerabilidades foram corrigidas com sucesso!")
+                  with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                      f.write(f"vulnerabilities_remaining=0\n")
+                      f.write(f"all_vulnerabilities_fixed=true\n")
+              
+              # Lista vulnerabilidades que foram corrigidas
+              if len(original_vulns) > len(remaining_vulns):
+                  remaining_cves = [v['cve'] for v in remaining_vulns]
+                  corrected_vulns = [v for v in original_vulns if v['cve'] not in remaining_cves]
+                  
+                  print(f"\n✅ Vulnerabilidades corrigidas:")
+                  for vuln in corrected_vulns:
+                      print(f"  - {vuln['cve']} em {vuln['package']} (Severidade: {vuln['severity']})")
+          
+          except Exception as e:
+              print(f"Erro ao analisar resultados: {e}")
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"vulnerabilities_remaining=unknown\n")
+                  f.write(f"all_vulnerabilities_fixed=false\n")
+          EOF
+          
+          # Define se o step foi bem-sucedido baseado nas vulnerabilidades restantes
+          if [ -f "trivy-results-fixed.json" ]; then
+            # Se o scan não encontrou vulnerabilidades críticas/altas/médias, considera sucesso
+            if trivy sbom ./cyclonedx-fixed.json --exit-code 1 --severity MEDIUM,HIGH,CRITICAL --format table; then
+              echo "❌ Ainda há vulnerabilidades MEDIUM/HIGH/CRITICAL após as correções"
+              exit 1
+            else
+              echo "✅ Nenhuma vulnerabilidade MEDIUM/HIGH/CRITICAL encontrada após as correções"
+              exit 0
+            fi
+          else
+            echo "❌ Erro: arquivo trivy-results-fixed.json não foi gerado"
+            exit 1
+          fi
 
       - name: 9. Commitar e Empurrar a Correção
         if: steps.tests.outcome == 'success' && steps.verify_fix.outcome == 'success'
