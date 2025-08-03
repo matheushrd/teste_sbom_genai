@@ -68,7 +68,7 @@ jobs:
         uses: aquasecurity/trivy-action@master
         with:
           # A linha 'scan-ref' foi REMOVIDA.
-          scan-ref: './app'
+          scan-ref: './app/'
           scan-type: 'sbom'
           input: 'cyclonedx.json'
           format: 'json'
