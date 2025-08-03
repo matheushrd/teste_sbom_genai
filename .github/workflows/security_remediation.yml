@@ -65,20 +65,16 @@ jobs:
           ./cyclonedx-cli validate --input-file ./app/cyclonedx.json
 
       - name: 5. Escanear SBOM com Grype
-        uses: anchore/grype-action@v3
+        id: anchore_scan
+        uses: anchore/scan-action@v6
         with:
-          # Aponta diretamente para o arquivo SBOM a ser escaneado
-          sbom: ./app/cyclonedx.json
+          sbom: "./app/cyclonedx.json"
+          fail-on-severity: 'medium'
           
-          # Falha o workflow se encontrar vulnerabilidades altas ou críticas
-          fail-on-severity: 'high, critical'
-          
-
-
       - name: 6. Gemini sugere e aplica a correção com OSV
         id: genai_fix
         # Certifique-se de que o nome do step anterior seja 'osv_scan'
-        if: steps.osv_scan.outcome == 'failure' 
+        if: steps.anchore_scan.outcome == 'failure' 
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           REQUIREMENTS_FILE_PATH: app/${{ steps.config.outputs.requirements_file }}
