@@ -2,7 +2,7 @@
 from libs.utils.utils_a import to_uppercase
 from libs.utils.utils_b import add_prefix
 #from libs.aws_connector.aws_connector import S3Connector
-import pandas as pd
+# import pandas as pd
 
 def process_data(input_data: str) -> str:
     """
@@ -15,10 +15,10 @@ def process_data(input_data: str) -> str:
 def main():
     """Função principal do aplicativo."""
     # Exemplo de uso do pandas
-    df = pd.DataFrame({'col1': [1, 2], 'col2': [3, 4]})
-    print("DataFrame criado com pandas:")
-    print(df.head())
-    print("-" * 20)
+    # df = pd.DataFrame({'col1': [1, 2], 'col2': [3, 4]})
+    # print("DataFrame criado com pandas:")
+    # print(df.head())
+    # print("-" * 20)
 
     # Processa os dados
     my_data = "dados para teste"
