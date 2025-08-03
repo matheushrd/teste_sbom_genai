@@ -53,9 +53,8 @@ jobs:
           cyclonedx-py requirements -i ${{ steps.config.outputs.requirements_file }} -o ./app/cyclonedx.json
 
       - name: 4.2 Validar SBOM
-        uses: CycloneDX/gh-action-validation@v1
-        with:
-          bom-location: './app/cyclonedx.json'
+        run: |
+          cyclonedx-py validate ./app/cyclonedx.json
 
       - name: 5. Escanear SBOM com Trivy
         id: trivy_scan
