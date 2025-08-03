@@ -84,7 +84,13 @@ jobs:
           # Também executa em formato table para exibição
           trivy sbom ./app/cyclonedx.json --exit-code 1 --severity MEDIUM,HIGH,CRITICAL --format table
 
+      - name: 5.3. Verificar arquivos existentes
+        run: |
+          echo "Verificando o conteúdo após o escaneamento:"
+          ls -R app/${{ steps.config.outputs.requirements_file }}
+          cat app/${{ steps.config.outputs.requirements_file }}
           
+
       - name: 6. Gemini sugere e aplica a correção com Trivy
         id: genai_fix
         if: steps.vulnerability_scan.outcome == 'failure'
