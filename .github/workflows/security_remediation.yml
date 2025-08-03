@@ -16,10 +16,6 @@ jobs:
         working-directory: ./app
 
     steps:
-      - name: 0. Rodar testes antes da verificação
-        run: |
-          pip install -r ${{ steps.config.outputs.test_requirements_file }}
-          pytest tests/
     
       - name: 1. Checkout do código-fonte
         uses: actions/checkout@v4
@@ -32,6 +28,11 @@ jobs:
           echo "python_version=$(yq '.python_version' ../ci_config.yml)" >> "$GITHUB_OUTPUT"
           echo "requirements_file=$(yq '.requirements_files[0]' ../ci_config.yml)" >> "$GITHUB_OUTPUT"
           echo "test_requirements_file=$(yq '.requirements_files[1]' ../ci_config.yml)" >> "$GITHUB_OUTPUT"
+
+      - name: 2.5. Rodar testes antes da verificação
+        run: |
+          pip install -r ${{ steps.config.outputs.test_requirements_file }}
+          pytest tests/
 
       - name: 3. Setup do ambiente Python
         uses: actions/setup-python@v5
