@@ -70,7 +70,7 @@ jobs:
           # A linha 'scan-ref' foi REMOVIDA.
           scan-type: 'sbom'
           input: './app/cyclonedx.json'
-          format: 'json'
+          format: 'cyclonedx'
           output: 'trivy-results.json'
           severity: 'HIGH,CRITICAL'
           ignore-unfixed: true
