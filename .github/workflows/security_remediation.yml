@@ -49,8 +49,11 @@ jobs:
       - name: 4.1 Gerar SBOM com CycloneDX
         run: |
           pip install cyclonedx-bom
-          cyclonedx-py requirements -i ${{ steps.config.outputs.requirements_file }} -o cyclonedx.json
+          cyclonedx-py requirements -i ${{ steps.config.outputs.requirements_file }} -o ./app/cyclonedx.json
 
+      - name: 4.2 Validar SBOM
+        run: |
+          cyclonedx-py validate ./app/cyclonedx.json  
 
       - name: 5. Escanear SBOM com Trivy
         id: trivy_scan
@@ -62,7 +65,6 @@ jobs:
           output: trivy-results.json
           severity: HIGH,CRITICAL
           ignore-unfixed: true
-        continue-on-error: true
 
 
       - name: 6. Gemini sugere e aplica a correção
