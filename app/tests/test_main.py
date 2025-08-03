@@ -3,8 +3,12 @@ import pytest
 import sys
 import os
 
+# Adiciona o diretório raiz 'app' ao path para que os imports funcionem
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from libs.utils.utils_a import to_uppercase
 from libs.utils.utils_b import add_prefix
+# from libs.aws_connector.aws_connector import S3Connector
 from main import process_data
 
 # Testes para utils_a.py
