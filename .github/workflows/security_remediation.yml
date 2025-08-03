@@ -245,6 +245,8 @@ jobs:
 
               IMPORTANTE: 
               - Sempre use a versão mais alta que resolve todas as vulnerabilidades
+              - Se não houver versão corrigida, responda 'nenhuma versão corrigida disponível'
+              - Sempre use uma versão especificada (ex: '1.2.3') e não um intervalo (ex: '>=1.2.0,<2.0.0')
 
               Responda APENAS com a nova linha para o arquivo de dependências, sem explicações adicionais."""
 
