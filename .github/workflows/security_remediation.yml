@@ -79,82 +79,147 @@ jobs:
           trivy sbom ./app/cyclonedx.json --exit-code 1 --severity MEDIUM,HIGH,CRITICAL --format table
 
           
-      - name: 6. Gemini sugere e aplica a correção com OSV
+      - name: 6. Gemini sugere e aplica a correção com Trivy
         id: genai_fix
-        # Certifique-se de que o nome do step anterior seja 'osv_scan'
-        if: steps.vulerability_scan.outcome == 'failure' 
+        if: steps.vulnerability_scan.outcome == 'failure'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           REQUIREMENTS_FILE_PATH: app/${{ steps.config.outputs.requirements_file }}
         run: |
           pip install google-generativeai
           python - << 'EOF'
-          import os, json, google.generativeai as genai, subprocess
+          import os, json, google.generativeai as genai, subprocess, re
 
           requirements_path = os.environ["REQUIREMENTS_FILE_PATH"]
-          pkg_name, installed_version, cve_id = None, None, None
+          pkg_name, installed_version, cve_id, fixed_version = None, None, None, None
 
           try:
-              # Assume que o resultado do OSV está em 'osv-results.json'
-              with open('osv-results.json', 'r') as f: data = json.load(f)
+              # Lê o resultado do Trivy em formato JSON
+              with open('trivy-results.json', 'r') as f: 
+                  data = json.load(f)
               
-              # Itera sobre a estrutura do JSON do OSV para encontrar a primeira vulnerabilidade
-              for result in data.get('results', []):
-                  for pkg_group in result.get('packages', []):
-                      if pkg_group.get('vulnerabilities'):
-                          pkg_info = pkg_group['package']
-                          vulnerability = pkg_group['vulnerabilities'][0]
-                          pkg_name = pkg_info.get('name')
-                          installed_version = pkg_info.get('version')
-                          cve_id = vulnerability.get('id')
-                          print(f"Vulnerabilidade encontrada: {cve_id} em {pkg_name}=={installed_version}")
-                          break
-                  if cve_id:
+              # Processa a estrutura do JSON do Trivy
+              for result in data.get('Results', []):
+                  if result.get('Type') == 'python-pkg' and result.get('Vulnerabilities'):
+                      vulnerability = result['Vulnerabilities'][0]  # Pega a primeira vulnerabilidade
+                      pkg_name = vulnerability.get('PkgName')
+                      installed_version = vulnerability.get('InstalledVersion')
+                      cve_id = vulnerability.get('VulnerabilityID')
+                      fixed_version = vulnerability.get('FixedVersion', '')
+                      print(f"Vulnerabilidade encontrada: {cve_id} em {pkg_name}=={installed_version}")
+                      if fixed_version:
+                          print(f"Versão corrigida disponível: {fixed_version}")
                       break
-          except (IOError, IndexError, KeyError, TypeError):
-              print("Nenhuma vulnerabilidade crítica encontrada ou erro ao ler o arquivo."); exit(0)
+                      
+          except (IOError, IndexError, KeyError, TypeError) as e:
+              print(f"Erro ao processar resultados do Trivy: {e}")
+              exit(0)
           
           if not cve_id:
-              print("Nenhuma vulnerabilidade encontrada nos resultados do OSV."); exit(0)
+              print("Nenhuma vulnerabilidade encontrada nos resultados do Trivy.")
+              exit(0)
 
+          # Encontra a linha no requirements.txt
           original_req_line = ""
           with open(requirements_path, 'r') as f:
               for line in f:
-                  if line.strip().lower().startswith(pkg_name.lower()):
+                  if line.strip().lower().startswith(pkg_name.lower() + '==') or line.strip().lower().startswith(pkg_name.lower() + '>='):
                       original_req_line = line.strip()
                       break
+                  elif line.strip().lower() == pkg_name.lower():
+                      original_req_line = line.strip()
+                      break
+                      
           if not original_req_line:
-              print(f"Biblioteca {pkg_name} não encontrada em {requirements_path}."); exit(1)
+              print(f"Biblioteca {pkg_name} não encontrada em {requirements_path}.")
+              exit(1)
 
-          prompt = f"Analisando um projeto Python, a vulnerabilidade '{cve_id}' foi encontrada na biblioteca '{pkg_name}', versão '{installed_version}'. O arquivo de dependências contém a linha: '{original_req_line}'. Qual é a menor atualização de versão para '{pkg_name}' que corrige essa falha e respeita a regra de versionamento original? Responda APENAS com a nova linha para o arquivo de dependências."
+          # Monta o prompt para o Gemini
+          fixed_info = f" A versão corrigida sugerida é '{fixed_version}'." if fixed_version else ""
+          prompt = f"""Analisando um projeto Python, a vulnerabilidade '{cve_id}' foi encontrada na biblioteca '{pkg_name}', versão '{installed_version}'.{fixed_info}
+          
+          O arquivo de dependências contém a linha: '{original_req_line}'
+          
+          Qual é a menor atualização de versão para '{pkg_name}' que corrige essa vulnerabilidade e respeita a regra de versionamento original?
+          
+          Responda APENAS com a nova linha para o arquivo de dependências, sem explicações adicionais."""
+
+          # Chama o Gemini
           genai.configure(api_key=os.environ["GEMINI_API_KEY"])
           model = genai.GenerativeModel('gemini-1.5-pro-latest')
           response = model.generate_content(prompt)
-          corrected_line = response.text.strip().replace("`", "")
+          corrected_line = response.text.strip().replace("`", "").replace("```", "")
           print(f"Gemini sugeriu a correção: '{corrected_line}'")
 
-          # Substitui a linha exata para evitar correspondências parciais
-          subprocess.run(["sed", "-i", f"s|^{original_req_line}$|{corrected_line}|", requirements_path], check=True)
+          # Substitui a linha no arquivo requirements.txt
+          with open(requirements_path, 'r') as f:
+              content = f.read()
+          
+          # Usa regex para substituir a linha exata
+          pattern = re.escape(original_req_line)
+          new_content = re.sub(f"^{pattern}$", corrected_line, content, flags=re.MULTILINE)
+          
+          with open(requirements_path, 'w') as f:
+              f.write(new_content)
 
+          # Define a mensagem do commit
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f"commit_message=fix(bot): upgrade {pkg_name} to remediate {cve_id}\n")
+              f.write(f"commit_message=fix(security): upgrade {pkg_name} to remediate {cve_id}\n")
+              f.write(f"vulnerability_fixed=true\n")
           EOF
-      - name: 7. Instalar dependências corrigidas e de teste
+
+      - name: 7. Instalar dependências corrigidas e executar testes
         id: tests
-        if: steps.genai_fix.outputs.commit_message != ''
+        if: steps.genai_fix.outputs.vulnerability_fixed == 'true'
         run: |
           echo "Instalando dependências corrigidas..."
           pip install -r ${{ steps.config.outputs.requirements_file }}
+          
           echo "Instalando dependências de teste..."
           pip install -r ${{ steps.config.outputs.test_requirements_file }}
-          echo "Rodando a suíte de testes..."
-          pytest tests/
+          
+          echo "Executando a suíte de testes..."
+          python -m pytest tests/ -v --tb=short
 
-      - name: 8. Commitar e Empurrar a Correção para o PR
+      - name: 8. Verificar se a correção resolveu a vulnerabilidade
+        id: verify_fix
         if: steps.tests.outcome == 'success'
+        continue-on-error: true
+        run: |
+          echo "Verificando se a vulnerabilidade foi corrigida..."
+          # Gera novo SBOM
+          trivy fs --format cyclonedx ${{ steps.config.outputs.app_path }} --output ./app/cyclonedx-fixed.json
+          
+          # Verifica se ainda há vulnerabilidades
+          trivy sbom ./app/cyclonedx-fixed.json --format json --output trivy-results-fixed.json --severity MEDIUM,HIGH,CRITICAL
+          trivy sbom ./app/cyclonedx-fixed.json --exit-code 1 --severity MEDIUM,HIGH,CRITICAL --format table
+
+      - name: 9. Commitar e Empurrar a Correção
+        if: steps.tests.outcome == 'success' && steps.verify_fix.outcome == 'success'
         run: |
           git config --global user.name 'GenAI Security Bot'
           git config --global user.email 'bot@users.noreply.github.com'
-          git commit -am "${{ steps.genai_fix.outputs.commit_message }}"
+          git add ${{ steps.config.outputs.requirements_file }}
+          git commit -m "${{ steps.genai_fix.outputs.commit_message }}"
           git push
-        working-directory: .
+
+      - name: 10. Comentar no PR sobre a correção
+        if: github.event_name == 'pull_request' && steps.tests.outcome == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const message = `🔒 **Correção de Segurança Aplicada Automaticamente**
+            
+            Uma vulnerabilidade foi detectada e corrigida automaticamente:
+            - **Commit**: ${{ steps.genai_fix.outputs.commit_message }}
+            - **Status dos Testes**: ✅ Aprovado
+            - **Verificação de Segurança**: ${{ steps.verify_fix.outcome == 'success' && '✅ Vulnerabilidade corrigida' || '⚠️ Necessita revisão manual' }}
+            
+            A correção foi aplicada pelo GenAI Security Bot.`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: message
+            });
