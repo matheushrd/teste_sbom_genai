@@ -64,19 +64,15 @@ jobs:
           # Executa a validação no seu arquivo SBOM
           ./cyclonedx-cli validate --input-file ./app/cyclonedx.json
 
-      - name: 5. Escanear SBOM com Trivy
-        uses: aquasecurity/trivy-action@master
+      - name: 5. Escanear SBOM com OSV-Scanner
+        uses: google/osv-scanner-action@v1
         with:
-          scan-type: 'sbom'
-          input: './app/cyclonedx.json'
-          format: 'json'
-          output: 'trivy-results.json'
-          severity: 'HIGH,CRITICAL'
-          ignore-unfixed: true
+          sbom: "./app/cyclonedx.json"
 
-      - name: 6. Gemini sugere e aplica a correção
+      - name: 6. Gemini sugere e aplica a correção com OSV
         id: genai_fix
-        if: steps.trivy_scan.outcome == 'failure'
+        # Certifique-se de que o nome do step anterior seja 'osv_scan'
+        if: steps.osv_scan.outcome == 'failure' 
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           REQUIREMENTS_FILE_PATH: app/${{ steps.config.outputs.requirements_file }}
@@ -86,34 +82,53 @@ jobs:
           import os, json, google.generativeai as genai, subprocess
 
           requirements_path = os.environ["REQUIREMENTS_FILE_PATH"]
+          pkg_name, installed_version, cve_id = None, None, None
+
           try:
-              with open('trivy-results.json', 'r') as f: data = json.load(f)
-              vulnerability = data[0]['Vulnerabilities'][0]
-              pkg_name, installed_version, cve_id = vulnerability['PkgName'], vulnerability['InstalledVersion'], vulnerability['VulnerabilityID']
-              print(f"Vulnerabilidade encontrada: {cve_id} em {pkg_name}=={installed_version}")
-          except (IOError, IndexError, KeyError):
-              print("Nenhuma vulnerabilidade crítica encontrada."); exit(0)
+              # Assume que o resultado do OSV está em 'osv-results.json'
+              with open('osv-results.json', 'r') as f: data = json.load(f)
+              
+              # Itera sobre a estrutura do JSON do OSV para encontrar a primeira vulnerabilidade
+              for result in data.get('results', []):
+                  for pkg_group in result.get('packages', []):
+                      if pkg_group.get('vulnerabilities'):
+                          pkg_info = pkg_group['package']
+                          vulnerability = pkg_group['vulnerabilities'][0]
+                          pkg_name = pkg_info.get('name')
+                          installed_version = pkg_info.get('version')
+                          cve_id = vulnerability.get('id')
+                          print(f"Vulnerabilidade encontrada: {cve_id} em {pkg_name}=={installed_version}")
+                          break
+                  if cve_id:
+                      break
+          except (IOError, IndexError, KeyError, TypeError):
+              print("Nenhuma vulnerabilidade crítica encontrada ou erro ao ler o arquivo."); exit(0)
+          
+          if not cve_id:
+              print("Nenhuma vulnerabilidade encontrada nos resultados do OSV."); exit(0)
 
           original_req_line = ""
           with open(requirements_path, 'r') as f:
               for line in f:
-                  if line.strip().startswith(pkg_name): original_req_line = line.strip(); break
+                  if line.strip().lower().startswith(pkg_name.lower()):
+                      original_req_line = line.strip()
+                      break
           if not original_req_line:
-              print(f"Biblioteca {pkg_name} não encontrada."); exit(1)
+              print(f"Biblioteca {pkg_name} não encontrada em {requirements_path}."); exit(1)
 
-          prompt = f"Analisando um projeto Python, a vulnerabilidade '{cve_id}' foi encontrada na biblioteca '{pkg_name}', versão '{installed_version}'. O arquivo '{requirements_path}' original contém a linha: '{original_req_line}'. Qual é a menor atualização de versão para '{pkg_name}' que corrige essa falha e respeita a regra de versionamento original? Responda APENAS com a nova linha para o arquivo de requirements."
+          prompt = f"Analisando um projeto Python, a vulnerabilidade '{cve_id}' foi encontrada na biblioteca '{pkg_name}', versão '{installed_version}'. O arquivo de dependências contém a linha: '{original_req_line}'. Qual é a menor atualização de versão para '{pkg_name}' que corrige essa falha e respeita a regra de versionamento original? Responda APENAS com a nova linha para o arquivo de dependências."
           genai.configure(api_key=os.environ["GEMINI_API_KEY"])
           model = genai.GenerativeModel('gemini-1.5-pro-latest')
           response = model.generate_content(prompt)
-          corrected_line = response.text.strip()
+          corrected_line = response.text.strip().replace("`", "")
           print(f"Gemini sugeriu a correção: '{corrected_line}'")
 
-          subprocess.run(["sed", "-i", f"s|{original_req_line}|{corrected_line}|g", requirements_path])
+          # Substitui a linha exata para evitar correspondências parciais
+          subprocess.run(["sed", "-i", f"s|^{original_req_line}$|{corrected_line}|", requirements_path], check=True)
 
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f"commit_message=fix(bot): upgrade {pkg_name} to remediate {cve_id}\n")
           EOF
-
       - name: 7. Instalar dependências corrigidas e de teste
         id: tests
         if: steps.genai_fix.outputs.commit_message != ''
