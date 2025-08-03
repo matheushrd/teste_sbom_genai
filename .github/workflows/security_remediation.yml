@@ -94,14 +94,13 @@ jobs:
         uses: anchore/scan-action@v6
         with:
           sbom: './app/cyclonedx.json'
-          # CORRIGIDO: Parâmetros corretos para falhar o build
           fail-build: true
-          severity-cutoff: 'medium
+          severity-cutoff: 'medium'
           
       - name: 6. Gemini sugere e aplica a correção com OSV
         id: genai_fix
         # Certifique-se de que o nome do step anterior seja 'osv_scan'
-        if: steps.trivy_scan.outcome == 'failure' 
+        if: steps.vulerability_scan.outcome == 'failure' 
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           REQUIREMENTS_FILE_PATH: app/${{ steps.config.outputs.requirements_file }}
