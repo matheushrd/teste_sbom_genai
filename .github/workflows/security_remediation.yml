@@ -67,8 +67,8 @@ jobs:
       - name: 4.3. Carregar SBOM como Artefato
         uses: actions/upload-artifact@v4
         with:
-          name: sbom-artifact # Nome do artefato
-          path: ./app/cyclonedx.json # Caminho do arquivo a ser salvo
+          name: sbom-artifact # <--- O NOME É ESTE
+          path: ./app/cyclonedx.json
 
       - name: 4.3.1. Verificar arquivos existentes
         run: ls -R ./app |
@@ -89,8 +89,8 @@ jobs:
       - name: 5.1. Baixar Artefato do SBOM
         uses: actions/download-artifact@v4
         with:
-          name: cyclonedx.json # Mesmo nome usado no upload
-          path: ./app # Diretório onde o artefato será extraído
+          name: cyclonedx.json # <--- NOME DIFERENTE
+          path: ./app
 
       - name: 5.1.1. Verificar arquivos existentes
         run: ls -R ./app
