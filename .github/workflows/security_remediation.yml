@@ -70,12 +70,13 @@ jobs:
           ls -R ./app
           cat ./app/cyclonedx.json
 
-      - name: 5.2 Instalar Trivy
+      - name: 5.1 Instalar Trivy
         uses: aquasecurity/trivy-action@master
 
-      - name: 5.3 Escanear SBOM com Trivy
+      - name: 5.2 Escanear SBOM com Trivy
         run: |
           trivy sbom --input ./app/cyclonedx.json --exit-code 1 --severity MEDIUM,HIGH,CRITICAL --format table
+
           
       - name: 6. Gemini sugere e aplica a correção com OSV
         id: genai_fix
