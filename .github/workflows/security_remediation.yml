@@ -70,6 +70,9 @@ jobs:
           name: sbom-artifact # Nome do artefato
           path: ./app/cyclonedx.json # Caminho do arquivo a ser salvo
 
+      - name: 4.3.1. Verificar arquivos existentes
+        run: ls -R ./app
+
       # - name: 5. Escanear SBOM com Trivy
       #   id: vulerability_scan
       #   uses: aquasecurity/trivy-action@master
