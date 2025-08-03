@@ -118,7 +118,7 @@ jobs:
           import os, json, google.generativeai as genai, subprocess, re
 
           requirements_path = os.environ["REQUIREMENTS_FILE_PATH"]
-          pkg_name, installed_version, cve_id, fixed_version = None, None, None, None
+          vulnerabilities_found = []
 
           print(f"Procurando arquivo de requisitos em: {requirements_path}")
           print(f"Diretório atual: {os.getcwd()}")
@@ -131,34 +131,41 @@ jobs:
               
               print(f"Estrutura do JSON Trivy: {list(data.keys())}")
               
-              # Processa a estrutura do JSON do Trivy
+              # Processa TODAS as vulnerabilidades encontradas pelo Trivy
               for result in data.get('Results', []):
-                  print(f"Tipo do resultado: {result.get('Type')}")
+                  print(f"Processando resultado do tipo: {result.get('Type')}")
+                  
                   if result.get('Type') == 'python-pkg' and result.get('Vulnerabilities'):
-                      vulnerability = result['Vulnerabilities'][0]  # Pega a primeira vulnerabilidade
-                      pkg_name = vulnerability.get('PkgName')
-                      installed_version = vulnerability.get('InstalledVersion')
-                      cve_id = vulnerability.get('VulnerabilityID')
-                      fixed_version = vulnerability.get('FixedVersion', '')
-                      print(f"Vulnerabilidade encontrada: {cve_id} em {pkg_name}=={installed_version}")
-                      if fixed_version:
-                          print(f"Versão corrigida disponível: {fixed_version}")
-                      break
+                      for vulnerability in result['Vulnerabilities']:
+                          vuln_data = {
+                              'pkg_name': vulnerability.get('PkgName'),
+                              'installed_version': vulnerability.get('InstalledVersion'),
+                              'cve_id': vulnerability.get('VulnerabilityID'),
+                              'fixed_version': vulnerability.get('FixedVersion', ''),
+                              'severity': vulnerability.get('Severity', 'UNKNOWN'),
+                              'title': vulnerability.get('Title', ''),
+                              'description': vulnerability.get('Description', '')
+                          }
+                          vulnerabilities_found.append(vuln_data)
+                          print(f"Vulnerabilidade encontrada: {vuln_data['cve_id']} em {vuln_data['pkg_name']}=={vuln_data['installed_version']} (Severidade: {vuln_data['severity']})")
+                          if vuln_data['fixed_version']:
+                              print(f"  → Versão corrigida disponível: {vuln_data['fixed_version']}")
                       
           except (IOError, IndexError, KeyError, TypeError) as e:
               print(f"Erro ao processar resultados do Trivy: {e}")
-              # Debug: vamos ver o conteúdo do arquivo
               try:
                   with open('trivy-results.json', 'r') as f:
                       content = f.read()
-                      print(f"Conteúdo do trivy-results.json: {content[:500]}...")
+                      print(f"Conteúdo do trivy-results.json: {content[:1000]}...")
               except:
                   print("Não foi possível ler o arquivo trivy-results.json")
               exit(0)
           
-          if not cve_id:
+          if not vulnerabilities_found:
               print("Nenhuma vulnerabilidade encontrada nos resultados do Trivy.")
               exit(0)
+
+          print(f"Total de vulnerabilidades encontradas: {len(vulnerabilities_found)}")
 
           # Verifica se o arquivo requirements.txt existe
           if not os.path.exists(requirements_path):
@@ -166,108 +173,183 @@ jobs:
               print(f"Arquivos disponíveis: {os.listdir('.')}")
               exit(1)
 
-          # Encontra a linha no requirements.txt
-          original_req_line = ""
+          # Lê o conteúdo atual do requirements.txt
           with open(requirements_path, 'r') as f:
-              content = f.read()
-              print(f"Conteúdo do {requirements_path}:")
-              print(content)
+              original_content = f.read()
               
-              for line in content.splitlines():
+          print(f"Conteúdo original do {requirements_path}:")
+          print(original_content)
+
+          # Agrupa vulnerabilidades por pacote para evitar múltiplas atualizações do mesmo pacote
+          packages_to_fix = {}
+          for vuln in vulnerabilities_found:
+              pkg_name = vuln['pkg_name']
+              if pkg_name not in packages_to_fix:
+                  packages_to_fix[pkg_name] = []
+              packages_to_fix[pkg_name].append(vuln)
+
+          print(f"Pacotes únicos a serem corrigidos: {list(packages_to_fix.keys())}")
+
+          updated_content = original_content
+          fixes_applied = []
+
+          # Processa cada pacote único
+          for pkg_name, pkg_vulnerabilities in packages_to_fix.items():
+              print(f"\n--- Processando pacote: {pkg_name} ---")
+              
+              # Encontra a linha no requirements.txt para este pacote
+              original_req_line = ""
+              for line in original_content.splitlines():
                   line_stripped = line.strip()
                   if not line_stripped or line_stripped.startswith('#'):
                       continue
                   
-                  # Verifica diferentes formatos de especificação de pacote
                   if (line_stripped.lower().startswith(pkg_name.lower() + '==') or 
                       line_stripped.lower().startswith(pkg_name.lower() + '>=') or
                       line_stripped.lower().startswith(pkg_name.lower() + '~=') or
                       line_stripped.lower() == pkg_name.lower()):
                       original_req_line = line_stripped
-                      print(f"Linha encontrada: {original_req_line}")
+                      print(f"Linha encontrada para {pkg_name}: {original_req_line}")
                       break
                       
-          if not original_req_line:
-              print(f"Biblioteca {pkg_name} não encontrada em {requirements_path}.")
-              exit(1)
+              if not original_req_line:
+                  print(f"Biblioteca {pkg_name} não encontrada em {requirements_path}. Pulando...")
+                  continue
 
-          # Monta o prompt para o Gemini
-          fixed_info = f" A versão corrigida sugerida é '{fixed_version}'." if fixed_version else ""
-          prompt = f"""Analisando um projeto Python, a vulnerabilidade '{cve_id}' foi encontrada na biblioteca '{pkg_name}', versão '{installed_version}'.{fixed_info}
-          
-          O arquivo de dependências contém a linha: '{original_req_line}'
-          
-          Qual é a menor atualização de versão para '{pkg_name}' que corrige essa vulnerabilidade e respeita a regra de versionamento original?
-          
-          Responda APENAS com a nova linha para o arquivo de dependências, sem explicações adicionais."""
+              # Coleta informações de todas as vulnerabilidades deste pacote
+              cve_list = [v['cve_id'] for v in pkg_vulnerabilities]
+              current_version = pkg_vulnerabilities[0]['installed_version']
+              
+              # Coleta todas as versões corrigidas sugeridas
+              fixed_versions = [v['fixed_version'] for v in pkg_vulnerabilities if v['fixed_version']]
+              fixed_versions_info = ", ".join(set(fixed_versions)) if fixed_versions else "não especificada"
 
-          # Chama o Gemini
-          genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-          model = genai.GenerativeModel(os.environ["GEMINI_VERSION"])
-          response = model.generate_content(prompt)
-          corrected_line = response.text.strip().replace("`", "").replace("```", "")
-          print(f"Gemini sugeriu a correção: '{corrected_line}'")
+              # Monta o prompt para o Gemini com TODAS as vulnerabilidades do pacote
+              vuln_details = "\n".join([
+                  f"  - {v['cve_id']} (Severidade: {v['severity']}) - Versão corrigida: {v['fixed_version'] or 'não especificada'}"
+                  for v in pkg_vulnerabilities
+              ])
 
-          # Substitui a linha no arquivo requirements.txt
-          with open(requirements_path, 'r') as f:
-              content = f.read()
-          
-          # Usa regex para substituir a linha exata
-          pattern = re.escape(original_req_line)
-          new_content = re.sub(f"^{pattern}$", corrected_line, content, flags=re.MULTILINE)
-          
-          with open(requirements_path, 'w') as f:
-              f.write(new_content)
+              prompt = f"""Analisando um projeto Python 3.10, foram encontradas as seguintes vulnerabilidades na biblioteca '{pkg_name}', versão '{current_version}':
 
-          print(f"Arquivo {requirements_path} atualizado!")
-          
-          # Mostra o conteúdo atualizado
-          with open(requirements_path, 'r') as f:
-              print(f"Novo conteúdo do {requirements_path}:")
-              print(f.read())
+              {vuln_details}
 
-          # Define a mensagem do commit
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f"commit_message=fix(security): upgrade {pkg_name} to remediate {cve_id}\n")
-              f.write(f"vulnerability_fixed=true\n")
-          EOF
-      
+              O arquivo de dependências contém a linha: '{original_req_line}'
+
+              Considerando TODAS essas vulnerabilidades, qual é a versão mais recente e estável de '{pkg_name}' que:
+              1. Corrige TODAS as vulnerabilidades listadas acima
+              2. É compatível com Python 3.10
+              3. Respeita a regra de versionamento original
+
+              Versões corrigidas sugeridas pelo scanner: {fixed_versions_info}
+
+              IMPORTANTE: 
+              - Para PyYAML, prefira versões >= 6.0 que têm melhor compatibilidade com Python 3.10
+              - Para requests, versões >= 2.20.0 são recomendadas
+              - Sempre use a versão mais alta que resolve todas as vulnerabilidades
+
+              Responda APENAS com a nova linha para o arquivo de dependências, sem explicações adicionais."""
+
+                            # Chama o Gemini
+                            genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+                            gemini_version = os.environ.get("GEMINI_VERSION", "gemini-1.5-pro-latest")
+                            model = genai.GenerativeModel(gemini_version)
+                            response = model.generate_content(prompt)
+                            corrected_line = response.text.strip().replace("`", "").replace("```", "")
+                            print(f"Gemini sugeriu a correção para {pkg_name}: '{corrected_line}'")
+
+                            # Aplica a substituição no conteúdo
+                            pattern = re.escape(original_req_line)
+                            updated_content = re.sub(f"^{pattern}$", corrected_line, updated_content, flags=re.MULTILINE)
+                            
+                            fixes_applied.append({
+                                'package': pkg_name,
+                                'original': original_req_line,
+                                'fixed': corrected_line,
+                                'cves': cve_list
+                            })
+
+                        # Salva o arquivo atualizado
+                        with open(requirements_path, 'w') as f:
+                            f.write(updated_content)
+
+                        print(f"\nArquivo {requirements_path} atualizado!")
+                        print(f"Novo conteúdo:")
+                        print(updated_content)
+
+                        # Gera mensagem de commit com todas as correções
+                        if fixes_applied:
+                            cve_list = []
+                            package_list = []
+                            for fix in fixes_applied:
+                                package_list.append(fix['package'])
+                                cve_list.extend(fix['cves'])
+                            
+                            packages_str = ", ".join(set(package_list))
+                            cves_str = ", ".join(set(cve_list))
+                            
+                            commit_message = f"fix(security): upgrade {packages_str} to remediate {cves_str}"
+                            
+                            with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                                f.write(f"commit_message={commit_message}\n")
+                                f.write(f"vulnerability_fixed=true\n")
+                                f.write(f"packages_fixed={len(fixes_applied)}\n")
+                                f.write(f"vulnerabilities_fixed={len(vulnerabilities_found)}\n")
+                                
+                            print(f"Correções aplicadas: {len(fixes_applied)} pacotes, {len(vulnerabilities_found)} vulnerabilidades")
+                        else:
+                            print("Nenhuma correção foi aplicada.")
+                            exit(1)
+                        EOF
+
       - name: 7. Instalar dependências corrigidas e executar testes
         id: tests
         if: steps.genai_fix.outputs.vulnerability_fixed == 'true'
         continue-on-error: true
         run: |
+          echo "=== Instalando dependências corrigidas pelo Gemini ==="
+          echo "Packages corrigidos: ${{ steps.genai_fix.outputs.packages_fixed }}"
+          echo "Vulnerabilidades corrigidas: ${{ steps.genai_fix.outputs.vulnerabilities_fixed }}"
+          
+          # Mostra o conteúdo atual do requirements.txt (já modificado pelo step 6)
+          echo "Conteúdo do requirements.txt após correções do Gemini:"
+          cat ${{ steps.config.outputs.requirements_file }}
+          
+          # Cria backup antes de tentar instalar (por segurança)
+          cp ${{ steps.config.outputs.requirements_file }} requirements_backup_step7.txt
+          echo "Backup de segurança criado: requirements_backup_step7.txt"
+          
+          # Tenta instalar as dependências exatamente como o Gemini sugeriu
           echo "Instalando dependências corrigidas..."
-          
-          # Tenta instalar as dependências corrigidas
-          if ! pip install -r ${{ steps.config.outputs.requirements_file }}; then
-            echo "Erro na instalação das dependências corrigidas. Tentando fallback..."
+          if pip install -r ${{ steps.config.outputs.requirements_file }}; then
+            echo "✅ Instalação bem-sucedida com as correções do Gemini!"
             
-            # Se falhar, tenta instalar versões mais recentes conhecidas
-            echo "Aplicando correções de compatibilidade..."
+            echo "Instalando dependências de teste..."
+            pip install -r ${{ steps.config.outputs.test_requirements_file }}
             
-            # Cria uma versão temporária do requirements.txt com versões mais compatíveis
-            cp ${{ steps.config.outputs.requirements_file }} requirements_backup.txt
+            echo "Executando a suíte de testes..."
+            python -m pytest tests/ -v --tb=short
             
-            # Substitui versões problemáticas conhecidas
-            sed -i 's/pyyaml==5\.4/pyyaml>=6.0,<7.0/g' ${{ steps.config.outputs.requirements_file }}
-            sed -i 's/pyyaml==5\.[0-9]/pyyaml>=6.0,<7.0/g' ${{ steps.config.outputs.requirements_file }}
+          else
+            echo "❌ Falha na instalação das dependências corrigidas pelo Gemini."
+            echo "Isso pode indicar que:"
+            echo "1. O Gemini sugeriu versões incompatíveis"
+            echo "2. Há conflitos de dependências"
+            echo "3. Problemas de conectividade com PyPI"
             
-            echo "Tentando instalar com versões corrigidas:"
-            cat ${{ steps.config.outputs.requirements_file }}
+            echo "Detalhes da falha:"
+            pip install -r ${{ steps.config.outputs.requirements_file }} --verbose
             
-            if ! pip install -r ${{ steps.config.outputs.requirements_file }}; then
-              echo "Falha na instalação mesmo com fallback. Restaurando arquivo original."
-              mv requirements_backup.txt ${{ steps.config.outputs.requirements_file }}
-              exit 1
+            echo "Restaurando arquivo original e falhando o step para revisão manual..."
+            if [ -f "requirements_backup_step7.txt" ]; then
+              mv requirements_backup_step7.txt ${{ steps.config.outputs.requirements_file }}
+              echo "Arquivo requirements.txt restaurado ao estado pré-instalação."
             fi
+            
+            echo "❌ Este step falhou - é necessária revisão manual das correções sugeridas pelo Gemini."
+            exit 1
           fi
-          
-          echo "Instalando dependências de teste..."
-          pip install -r ${{ steps.config.outputs.test_requirements_file }}
-          
-          echo "Executando a suíte de testes..."
-          python -m pytest tests/ -v --tb=short
+
       - name: 8. Verificar se a correção resolveu a vulnerabilidade
         id: verify_fix
         if: steps.tests.outcome == 'success'
