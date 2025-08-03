@@ -231,19 +231,43 @@ jobs:
               f.write(f"commit_message=fix(security): upgrade {pkg_name} to remediate {cve_id}\n")
               f.write(f"vulnerability_fixed=true\n")
           EOF
+      
       - name: 7. Instalar dependências corrigidas e executar testes
         id: tests
         if: steps.genai_fix.outputs.vulnerability_fixed == 'true'
+        continue-on-error: true
         run: |
           echo "Instalando dependências corrigidas..."
-          pip install -r ${{ steps.config.outputs.requirements_file }}
+          
+          # Tenta instalar as dependências corrigidas
+          if ! pip install -r ${{ steps.config.outputs.requirements_file }}; then
+            echo "Erro na instalação das dependências corrigidas. Tentando fallback..."
+            
+            # Se falhar, tenta instalar versões mais recentes conhecidas
+            echo "Aplicando correções de compatibilidade..."
+            
+            # Cria uma versão temporária do requirements.txt com versões mais compatíveis
+            cp ${{ steps.config.outputs.requirements_file }} requirements_backup.txt
+            
+            # Substitui versões problemáticas conhecidas
+            sed -i 's/pyyaml==5\.4/pyyaml>=6.0,<7.0/g' ${{ steps.config.outputs.requirements_file }}
+            sed -i 's/pyyaml==5\.[0-9]/pyyaml>=6.0,<7.0/g' ${{ steps.config.outputs.requirements_file }}
+            
+            echo "Tentando instalar com versões corrigidas:"
+            cat ${{ steps.config.outputs.requirements_file }}
+            
+            if ! pip install -r ${{ steps.config.outputs.requirements_file }}; then
+              echo "Falha na instalação mesmo com fallback. Restaurando arquivo original."
+              mv requirements_backup.txt ${{ steps.config.outputs.requirements_file }}
+              exit 1
+            fi
+          fi
           
           echo "Instalando dependências de teste..."
           pip install -r ${{ steps.config.outputs.test_requirements_file }}
           
           echo "Executando a suíte de testes..."
           python -m pytest tests/ -v --tb=short
-
       - name: 8. Verificar se a correção resolveu a vulnerabilidade
         id: verify_fix
         if: steps.tests.outcome == 'success'
