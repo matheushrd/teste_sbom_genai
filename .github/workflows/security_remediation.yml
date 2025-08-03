@@ -70,13 +70,12 @@ jobs:
           ls -R ./app
           cat ./app/cyclonedx.json
 
-      - name: 5.2. Escanear SBOM com Grype
-        id: vulerability_scan
-        uses: anchore/scan-action@v6
-        with:
-          sbom: './app/cyclonedx.json'
-          fail-build: true
-          severity-cutoff: 'medium'
+      - name: 5.2 Instalar Trivy
+        uses: aquasecurity/trivy-action@master
+
+      - name: 5.3 Escanear SBOM com Trivy
+        run: |
+          trivy sbom --input ./app/cyclonedx.json --exit-code 1 --severity MEDIUM,HIGH,CRITICAL --format table
           
       - name: 6. Gemini sugere e aplica a correção com OSV
         id: genai_fix
