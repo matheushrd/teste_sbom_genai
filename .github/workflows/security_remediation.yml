@@ -85,12 +85,11 @@ jobs:
       - name: 5.1. Baixar Artefato do SBOM
         uses: actions/download-artifact@v4
         with:
-          name: sbom-artifact # Mesmo nome usado no upload
+          name: cyclonedx.json # Mesmo nome usado no upload
           path: ./app # Diretório onde o artefato será extraído
 
       - name: 5.1.1. Verificar arquivos existentes
         run: ls -R ./app
-
 
       - name: 5.2. Escanear SBOM com Grype
         id: vulerability_scan
