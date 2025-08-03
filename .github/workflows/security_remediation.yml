@@ -53,11 +53,16 @@ jobs:
           mkdir -p app
           cyclonedx-py requirements -i ${{ steps.config.outputs.requirements_file }} -o ./app/cyclonedx.json
 
-      - name: 4.2 Validar SBOM
-        # Usa a action oficial para validação, pois a lib não possui o comando 'validate'
-        uses: CycloneDX/gh-action-validation@v1
-        with:
-          bom-location: './app/cyclonedx.json'
+      - name: 4.2 Validar SBOM (Método Manual)
+        run: |
+          # Baixa a ferramenta de linha de comando (CLI) do CycloneDX
+          curl -L -o cyclonedx-cli https://github.com/CycloneDX/cyclonedx-cli/releases/latest/download/cyclonedx-linux-x64
+
+          # Dá permissão de execução para a ferramenta
+          chmod +x cyclonedx-cli
+
+          # Executa a validação no seu arquivo SBOM
+          ./cyclonedx-cli validate --input-file ./app/cyclonedx.json
 
       - name: 5. Escanear SBOM com Trivy
         # Este passo já estava correto e não precisa de alterações
