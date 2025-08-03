@@ -64,28 +64,29 @@ jobs:
           # Executa a validação no seu arquivo SBOM
           ./cyclonedx-cli validate --input-file ./app/cyclonedx.json
 
-      # - name: 5. Escanear SBOM com Trivy
-      #   uses: aquasecurity/trivy-action@master
-      #   with:
-      #     # A linha 'scan-ref' foi REMOVIDA.
-      #     scan-type: 'sbom'
-      #     input: './app/cyclonedx.json'
-      #     format: 'json'
-      #     output: 'trivy-results.json'
-      #     severity: 'HIGH,CRITICAL'
-      #     ignore-unfixed: true
-
-      - name: 5. Escanear SBOM com Grype
-        id: anchore_scan
-        uses: anchore/scan-action@v6
+      - name: 5. Escanear SBOM com Trivy
+        id: trivy_scan
+        uses: aquasecurity/trivy-action@master
         with:
-          sbom: "./app/cyclonedx.json"
-          fail-on-severity: 'medium'
+          # A linha 'scan-ref' foi REMOVIDA.
+          scan-type: 'sbom'
+          input: './app/cyclonedx.json'
+          format: 'json'
+          output: 'trivy-results.json'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+
+      # - name: 5. Escanear SBOM com Grype
+      #   id: anchore_scan
+      #   uses: anchore/scan-action@v6
+      #   with:
+      #     sbom: "./app/cyclonedx.json"
+      #     fail-on-severity: 'medium'
           
       - name: 6. Gemini sugere e aplica a correção com OSV
         id: genai_fix
         # Certifique-se de que o nome do step anterior seja 'osv_scan'
-        if: steps.anchore_scan.outcome == 'failure' 
+        if: steps.trivy_scan.outcome == 'failure' 
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           REQUIREMENTS_FILE_PATH: app/${{ steps.config.outputs.requirements_file }}
