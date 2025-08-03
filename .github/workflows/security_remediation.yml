@@ -110,7 +110,7 @@ jobs:
         if: steps.vulnerability_scan.outcome == 'failure'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          REQUIREMENTS_FILE_PATH: app/${{ steps.config.outputs.requirements_file }}
+          REQUIREMENTS_FILE_PATH: ${{ steps.config.outputs.requirements_file }}
         run: |
           pip install google-generativeai
           python - << 'EOF'
@@ -119,13 +119,20 @@ jobs:
           requirements_path = os.environ["REQUIREMENTS_FILE_PATH"]
           pkg_name, installed_version, cve_id, fixed_version = None, None, None, None
 
+          print(f"Procurando arquivo de requisitos em: {requirements_path}")
+          print(f"Diretório atual: {os.getcwd()}")
+          print(f"Arquivos no diretório: {os.listdir('.')}")
+
           try:
               # Lê o resultado do Trivy em formato JSON
               with open('trivy-results.json', 'r') as f: 
                   data = json.load(f)
               
+              print(f"Estrutura do JSON Trivy: {list(data.keys())}")
+              
               # Processa a estrutura do JSON do Trivy
               for result in data.get('Results', []):
+                  print(f"Tipo do resultado: {result.get('Type')}")
                   if result.get('Type') == 'python-pkg' and result.get('Vulnerabilities'):
                       vulnerability = result['Vulnerabilities'][0]  # Pega a primeira vulnerabilidade
                       pkg_name = vulnerability.get('PkgName')
@@ -139,21 +146,44 @@ jobs:
                       
           except (IOError, IndexError, KeyError, TypeError) as e:
               print(f"Erro ao processar resultados do Trivy: {e}")
+              # Debug: vamos ver o conteúdo do arquivo
+              try:
+                  with open('trivy-results.json', 'r') as f:
+                      content = f.read()
+                      print(f"Conteúdo do trivy-results.json: {content[:500]}...")
+              except:
+                  print("Não foi possível ler o arquivo trivy-results.json")
               exit(0)
           
           if not cve_id:
               print("Nenhuma vulnerabilidade encontrada nos resultados do Trivy.")
               exit(0)
 
+          # Verifica se o arquivo requirements.txt existe
+          if not os.path.exists(requirements_path):
+              print(f"Arquivo {requirements_path} não encontrado!")
+              print(f"Arquivos disponíveis: {os.listdir('.')}")
+              exit(1)
+
           # Encontra a linha no requirements.txt
           original_req_line = ""
           with open(requirements_path, 'r') as f:
-              for line in f:
-                  if line.strip().lower().startswith(pkg_name.lower() + '==') or line.strip().lower().startswith(pkg_name.lower() + '>='):
-                      original_req_line = line.strip()
-                      break
-                  elif line.strip().lower() == pkg_name.lower():
-                      original_req_line = line.strip()
+              content = f.read()
+              print(f"Conteúdo do {requirements_path}:")
+              print(content)
+              
+              for line in content.splitlines():
+                  line_stripped = line.strip()
+                  if not line_stripped or line_stripped.startswith('#'):
+                      continue
+                  
+                  # Verifica diferentes formatos de especificação de pacote
+                  if (line_stripped.lower().startswith(pkg_name.lower() + '==') or 
+                      line_stripped.lower().startswith(pkg_name.lower() + '>=') or
+                      line_stripped.lower().startswith(pkg_name.lower() + '~=') or
+                      line_stripped.lower() == pkg_name.lower()):
+                      original_req_line = line_stripped
+                      print(f"Linha encontrada: {original_req_line}")
                       break
                       
           if not original_req_line:
@@ -188,12 +218,18 @@ jobs:
           with open(requirements_path, 'w') as f:
               f.write(new_content)
 
+          print(f"Arquivo {requirements_path} atualizado!")
+          
+          # Mostra o conteúdo atualizado
+          with open(requirements_path, 'r') as f:
+              print(f"Novo conteúdo do {requirements_path}:")
+              print(f.read())
+
           # Define a mensagem do commit
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f"commit_message=fix(security): upgrade {pkg_name} to remediate {cve_id}\n")
               f.write(f"vulnerability_fixed=true\n")
           EOF
-
       - name: 7. Instalar dependências corrigidas e executar testes
         id: tests
         if: steps.genai_fix.outputs.vulnerability_fixed == 'true'
