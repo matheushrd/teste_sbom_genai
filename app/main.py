@@ -1,7 +1,7 @@
 # app/main.py
 from libs.utils.utils_a import to_uppercase
 from libs.utils.utils_b import add_prefix
-from libs.aws_connector.aws_connector import S3Connector
+#from libs.aws_connector.aws_connector import S3Connector
 import pandas as pd
 
 def process_data(input_data: str) -> str:
