@@ -1,90 +1,135 @@
-name: Security Remediation CI
+name: GenAI Security Auto-Remediation on PR
 
 on:
   pull_request:
-    branches:
-      - main
+    branches: ['main']
+    types: [opened, synchronize]
+
+permissions:
+  contents: write
 
 jobs:
-  security-remediation:
+  scan-and-remediate:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: 1. Checkout do código-fonte
         uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
         with:
-          python-version: '3.10'
+          ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Install dependencies
+      - name: 2. Instalar yq para ler YAML
+        run: sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 && sudo chmod a+x /usr/local/bin/yq
+
+      - name: 3. Ler configuração do pipeline
+        id: config
         run: |
-          python -m pip install --upgrade pip
-          pip install -r app/requirements.txt
-          pip install -r app/requirements_test.txt
+          echo "python_version=$(yq '.python_version' ci_config.yml)" >> "$GITHUB_OUTPUT"
+          echo "requirements_file=$(yq '.requirements_files[0]' ci_config.yml)" >> "$GITHUB_OUTPUT"
+          echo "test_requirements_file=$(yq '.requirements_files[1]' ci_config.yml)" >> "$GITHUB_OUTPUT"
 
-      - name: Run tests
-        id: tests
-        run: pytest app/tests/
-
-      - name: Install SBOM Generator
-        run: pip install cyclonedx-python-lib
-
-      - name: Generate SBOM
-        run: cyclonedx-py -r app/requirements.txt --format json -o sbom.json
-
-      - name: Scan SBOM with Trivy
-        id: trivy_scan
-        uses: aquasecurity/trivy-action@master
+      - name: 4. Setup do ambiente Python
+        uses: actions/setup-python@v5
         with:
-          input: 'sbom.json'
+          python-version: ${{ steps.config.outputs.python_version }}
+          cache: 'pip'
+          cache-dependency-path: app/${{ steps.config.outputs.requirements_file }}
+
+      - name: 5. Instalar dependências e rodar testes iniciais
+        id: initial_tests
+        run: |
+          pip install -r app/${{ steps.config.outputs.requirements_file }}
+          pip install -r app/${{ steps.config.outputs.test_requirements_file }}
+          pytest app/tests/
+
+      - name: 6. Escanear dependências com Trivy
+        id: trivy_scan
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          scan-type: 'fs'
+          scan-ref: './app'
           format: 'json'
           output: 'trivy-results.json'
-          ignore-unfixed: true
           severity: 'HIGH,CRITICAL'
-        # Continue on error so we can process the results
+          ignore-unfixed: true
+          exit-code: '1' # Garante que o outcome seja 'failure' se vulnerabilidades forem encontradas
         continue-on-error: true
 
-      - name: Generate and Apply Fix with GenAI
+      - name: 7. Gemini sugere e aplica a correção
         id: genai_fix
-        run: |
-          # This is a placeholder for the GenAI remediation script
-          # 1. Parse trivy-results.json to find vulnerabilities
-          # 2. Construct a prompt for the Gemini API to ask for updated packages
-          # 3. Call the Gemini API (requires a GEMINI_API_KEY secret)
-          # 4. Parse the Gemini response and update app/requirements.txt
-          # For now, we'll simulate a change if vulnerabilities are found
-          if [[ -s trivy-results.json ]]; then
-            echo "Vulnerabilities found. Simulating a fix by GenAI."
-            # Placeholder: In a real scenario, you would parse the output and update intelligently
-            # For this example, let's assume we are updating pandas
-            sed -i 's/pandas==1.3.5/pandas==1.5.3/' app/requirements.txt
-            echo "changes_applied=true" >> $GITHUB_OUTPUT
-          else
-            echo "No vulnerabilities found."
-            echo "changes_applied=false" >> $GITHUB_OUTPUT
-          fi
+        if: steps.initial_tests.outcome == 'success' && steps.trivy_scan.outcome == 'failure'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-
-      - name: Install updated dependencies
-        if: steps.genai_fix.outputs.changes_applied == 'true'
+          REQUIREMENTS_FILE_PATH: app/${{ steps.config.outputs.requirements_file }}
         run: |
-          pip install -r app/requirements.txt
+          pip install google-generativeai
+          python - << 'EOF'
+          import os, json, google.generativeai as genai, subprocess
 
-      - name: Run tests again with updated dependencies
-        if: steps.genai_fix.outputs.changes_applied == 'true'
-        run: pytest app/tests/
+          requirements_path = os.environ["REQUIREMENTS_FILE_PATH"]
+          trivy_results_path = 'trivy-results.json'
+          
+          try:
+              with open(trivy_results_path, 'r') as f:
+                  results = json.load(f)
+              
+              # O output do trivy-action pode ser uma lista de "targets"
+              if not results or "Results" not in results[0] or not results[0]["Results"]:
+                  print("Nenhuma vulnerabilidade encontrada no formato esperado.")
+                  exit(0)
 
-      - name: Create Pull Request with fixes
-        if: steps.genai_fix.outputs.changes_applied == 'true'
-        uses: peter-evans/create-pull-request@v5
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "fix(deps): Update dependencies to fix vulnerabilities"
-          title: "Automatic Security Fixes"
-          body: |
-            This PR was automatically generated to fix security vulnerabilities found by Trivy.
-            Please review the changes and merge if they are correct.
-          branch: "security-fixes"
+              vulnerability = results[0]['Results'][0]['Vulnerabilities'][0]
+              pkg_name = vulnerability['PkgName']
+              installed_version = vulnerability['InstalledVersion']
+              cve_id = vulnerability['VulnerabilityID']
+              print(f"Vulnerabilidade encontrada: {cve_id} em {pkg_name}=={installed_version}")
+
+          except (IOError, IndexError, KeyError, TypeError) as e:
+              print(f"Nenhuma vulnerabilidade crítica encontrada ou erro ao processar o arquivo de resultados: {e}");
+              exit(0)
+
+          original_req_line = ""
+          with open(requirements_path, 'r') as f:
+              for line in f:
+                  if line.strip().lower().startswith(pkg_name.lower()):
+                      original_req_line = line.strip()
+                      break
+          
+          if not original_req_line:
+              print(f"Biblioteca {pkg_name} não encontrada em {requirements_path}.");
+              exit(1)
+
+          prompt = f"Analisando um projeto Python, a vulnerabilidade '{cve_id}' foi encontrada na biblioteca '{pkg_name}', versão '{installed_version}'. O arquivo '{os.path.basename(requirements_path)}' original contém a linha: '{original_req_line}'. Qual é a menor atualização de versão para '{pkg_name}' que corrige essa falha e respeita a regra de versionamento original (ex: se for '==', mantenha; se for '~=', atualize)? Responda APENAS com a nova linha para o arquivo de requirements."
+          
+          genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+          model = genai.GenerativeModel('gemini-1.5-pro-latest')
+          response = model.generate_content(prompt)
+          corrected_line = response.text.strip().replace("`", "")
+          
+          print(f"Gemini sugeriu a correção: '{corrected_line}'")
+
+          # Usando sed para substituir a linha no arquivo de requirements
+          subprocess.run(["sed", "-i", f"s|{original_req_line}|{corrected_line}|g", requirements_path], check=True)
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"commit_message=fix(bot): upgrade {pkg_name} to remediate {cve_id}\n")
+          EOF
+
+      - name: 8. Instalar dependências corrigidas e testar novamente
+        id: final_tests
+        if: steps.genai_fix.outputs.commit_message != ''
+        run: |
+          echo "Instalando dependências corrigidas..."
+          pip install -r app/${{ steps.config.outputs.requirements_file }}
+          echo "Instalando dependências de teste..."
+          pip install -r app/${{ steps.config.outputs.test_requirements_file }}
+          echo "Rodando a suíte de testes com a correção..."
+          pytest app/tests/
+
+      - name: 9. Commitar e Empurrar a Correção para o PR
+        if: steps.final_tests.outcome == 'success' && steps.genai_fix.outputs.commit_message != ''
+        run: |
+          git config --global user.name 'GenAI Security Bot'
+          git config --global user.email 'bot@users.noreply.github.com'
+          git commit -am "${{ steps.genai_fix.outputs.commit_message }}"
+          git push
