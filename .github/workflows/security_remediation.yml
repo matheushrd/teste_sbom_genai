@@ -49,18 +49,18 @@ jobs:
       - name: 4.1 Gerar SBOM com CycloneDX
         run: |
           pip install cyclonedx-bom
-          cyclonedx-py requirements -i ${{ steps.config.outputs.requirements_file }} -o ./cyclonedx.json
+          cyclonedx-py requirements -i ${{ steps.config.outputs.requirements_file }} -o ./app/cyclonedx.json
 
       - name: 4.2 Validar SBOM
         run: |
-          cyclonedx-py validate ./cyclonedx.json  
+          cyclonedx-py validate ./app/cyclonedx.json
 
       - name: 5. Escanear SBOM com Trivy
         id: trivy_scan
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: sbom
-          input: ./cyclonedx.json
+          input: ./app/cyclonedx.json
           format: json
           output: trivy-results.json
           severity: HIGH,CRITICAL
