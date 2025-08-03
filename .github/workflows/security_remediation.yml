@@ -73,8 +73,6 @@ jobs:
           output: 'trivy-results.json'
           severity: 'HIGH,CRITICAL'
           ignore-unfixed: true
-          env:
-            TRIVY_DEBUG: true
 
       - name: 6. Gemini sugere e aplica a correção
         id: genai_fix
