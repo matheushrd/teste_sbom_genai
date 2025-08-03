@@ -43,6 +43,7 @@ jobs:
 
       - name: 4. Instalar dependências e gerar SBOM real
         run: |
+          mkdir -p app
           pip install -r ${{ steps.config.outputs.requirements_file }}
           pip freeze > ${{ github.workspace }}/app/bom.txt  # cria ./app/bom.txt
 
