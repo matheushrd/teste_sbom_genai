@@ -64,6 +64,17 @@ jobs:
           # Executa a validação no seu arquivo SBOM
           ./cyclonedx-cli validate --input-file ./app/cyclonedx.json
 
+      # - name: 5. Escanear SBOM com Trivy
+      #   uses: aquasecurity/trivy-action@master
+      #   with:
+      #     # A linha 'scan-ref' foi REMOVIDA.
+      #     scan-type: 'sbom'
+      #     input: './app/cyclonedx.json'
+      #     format: 'json'
+      #     output: 'trivy-results.json'
+      #     severity: 'HIGH,CRITICAL'
+      #     ignore-unfixed: true
+
       - name: 5. Escanear SBOM com Grype
         id: anchore_scan
         uses: anchore/scan-action@v6
