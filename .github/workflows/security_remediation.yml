@@ -46,11 +46,11 @@ jobs:
           pip install -r ${{ steps.config.outputs.requirements_file }}
           pip freeze > bom.txt  # cria ./app/bom.txt
 
-      - name: 5. Escanear dependências com Trivy (modo filesystem)
+      - name: 5. Escanear dependências com Trivy (modo dependência)
         id: trivy_scan
         uses: aquasecurity/trivy-action@master
         with:
-          scan-type: 'fs'
+          scan-type: 'library'
           scan-ref: './app'
           format: 'json'
           output: 'trivy-results.json'
