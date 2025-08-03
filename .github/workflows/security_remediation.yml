@@ -76,7 +76,7 @@ jobs:
 
       - name: 5.2 Escanear SBOM com Trivy
         run: |
-          trivy sbom --input ./app/cyclonedx.json --exit-code 1 --severity MEDIUM,HIGH,CRITICAL --format table
+          trivy sbom ./app/cyclonedx.json --exit-code 1 --severity MEDIUM,HIGH,CRITICAL --format table
 
           
       - name: 6. Gemini sugere e aplica a correção com OSV
