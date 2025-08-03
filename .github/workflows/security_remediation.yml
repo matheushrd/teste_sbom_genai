@@ -46,6 +46,11 @@ jobs:
           pip install -r ${{ steps.config.outputs.requirements_file }}
           pip freeze > ${{ github.workspace }}/app/bom.txt  # cria ./app/bom.txt
 
+      - name: 4.1 Gerar SBOM com CycloneDX
+        run: |
+          pip install cyclonedx-bom
+          cyclonedx-py -o cyclonedx.json
+
       - name: 5. Escanear dependências com Trivy (modo filesystem)
         id: trivy_scan
         uses: aquasecurity/trivy-action@master
