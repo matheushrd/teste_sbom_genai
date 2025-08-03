@@ -244,8 +244,6 @@ jobs:
               Versões corrigidas sugeridas pelo scanner: {fixed_versions_info}
 
               IMPORTANTE: 
-              - Para PyYAML, prefira versões >= 6.0 que têm melhor compatibilidade com Python 3.10
-              - Para requests, versões >= 2.20.0 são recomendadas
               - Sempre use a versão mais alta que resolve todas as vulnerabilidades
 
               Responda APENAS com a nova linha para o arquivo de dependências, sem explicações adicionais."""
