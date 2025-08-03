@@ -87,8 +87,22 @@ jobs:
       - name: 5.3. Verificar arquivos existentes
         run: |
           echo "Verificando o conteúdo após o escaneamento:"
-          ls -R app/${{ steps.config.outputs.requirements_file }}
-          cat app/${{ steps.config.outputs.requirements_file }}
+          echo "Listando arquivos no diretório app/:"
+          ls -la ./
+          echo "Conteúdo do arquivo requirements.txt:"
+          if [ -f "${{ steps.config.outputs.requirements_file }}" ]; then
+            cat "${{ steps.config.outputs.requirements_file }}"
+          else
+            echo "Arquivo ${{ steps.config.outputs.requirements_file }} não encontrado!"
+          fi
+          echo "Verificando se trivy-results.json foi criado:"
+          if [ -f "trivy-results.json" ]; then
+            echo "✅ trivy-results.json foi criado com sucesso"
+            echo "Primeiras linhas do arquivo:"
+            head -20 trivy-results.json
+          else
+            echo "❌ trivy-results.json não foi encontrado"
+          fi
           
 
       - name: 6. Gemini sugere e aplica a correção com Trivy
