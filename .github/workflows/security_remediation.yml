@@ -203,7 +203,7 @@ jobs:
 
           # Chama o Gemini
           genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-          model = genai.GenerativeModel('os.environ["GEMINI_VERSION"])
+          model = genai.GenerativeModel(os.environ["GEMINI_VERSION"])
           response = model.generate_content(prompt)
           corrected_line = response.text.strip().replace("`", "").replace("```", "")
           print(f"Gemini sugeriu a correção: '{corrected_line}'")
