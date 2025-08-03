@@ -64,6 +64,12 @@ jobs:
           # Executa a validação no seu arquivo SBOM
           ./cyclonedx-cli validate --input-file ./app/cyclonedx.json
 
+      - name: 4.3. Carregar SBOM como Artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-artifact # Nome do artefato
+          path: ./app/cyclonedx.json # Caminho do arquivo a ser salvo
+
       # - name: 5. Escanear SBOM com Trivy
       #   id: vulerability_scan
       #   uses: aquasecurity/trivy-action@master
@@ -76,7 +82,17 @@ jobs:
       #     severity: 'HIGH,CRITICAL'
       #     ignore-unfixed: true
 
-      - name: 5. Escanear SBOM com Grype
+      - name: 5.1. Baixar Artefato do SBOM
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom-artifact # Mesmo nome usado no upload
+          path: ./app # Diretório onde o artefato será extraído
+
+      - name: 5.1.1. Verificar arquivos existentes
+        run: ls -R ./app
+
+
+      - name: 5.2. Escanear SBOM com Grype
         id: vulerability_scan
         uses: anchore/scan-action@v6
         with:
