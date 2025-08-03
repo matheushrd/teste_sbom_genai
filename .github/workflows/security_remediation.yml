@@ -587,28 +587,40 @@ jobs:
       - name: 10. Comentar no PR sobre a correção
         if: github.event_name == 'pull_request' && steps.tests.outcome == 'success'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           # Determina o status da verificação de segurança
           if [ "${{ steps.verify_fix.outputs.fix_successful }}" = "true" ]; then
-            security_status="✅ Vulnerabilidade corrigida"
+            security_status="✅ Vulnerabilidades corrigidas"
+            security_icon="✅"
           else
             security_status="⚠️ Necessita revisão manual"
+            security_icon="⚠️"
           fi
           
-          # Cria a mensagem do comentário
-          cat > comment_body.md << 'EOF'
+          # Substitui variáveis no template
+          cat > comment_body.md << EOF
           🔒 **Correção de Segurança Aplicada Automaticamente**
           
           Uma vulnerabilidade foi detectada e corrigida automaticamente:
-          - **Commit**: ${{ steps.genai_fix.outputs.commit_message }}
-          - **Packages Corrigidos**: ${{ steps.genai_fix.outputs.packages_fixed }}
-          - **Vulnerabilidades Processadas**: ${{ steps.genai_fix.outputs.vulnerabilities_fixed }}
-          - **Status dos Testes**: ✅ Aprovado
-          - **Verificação de Segurança**: ${security_status}
+          - **Commit:** \`${{ steps.genai_fix.outputs.commit_message }}\`
+          - **Packages Corrigidos:** ${{ steps.genai_fix.outputs.packages_fixed }}
+          - **Vulnerabilidades Processadas:** ${{ steps.genai_fix.outputs.vulnerabilities_fixed }}
+          - **Status dos Testes:** ✅ Aprovado
+          - **Verificação de Segurança:** $security_status
           
-          A correção foi aplicada pelo GenAI Security Bot.
+          $security_icon A correção foi aplicada pelo **GenAI Security Bot**.
+          
+          ---
+          *Para mais detalhes, consulte os logs do workflow.*
           EOF
           
-          # Usa gh CLI para comentar no PR
-          gh pr comment ${{ github.event.pull_request.number }} --body-file comment_body.md
+          # Tenta comentar no PR
+          if gh pr comment ${{ github.event.pull_request.number }} --body-file comment_body.md; then
+            echo "✅ Comentário adicionado ao PR com sucesso!"
+          else
+            echo "⚠️ Não foi possível comentar no PR. Mostrando resumo nos logs:"
+            echo "----------------------------------------"
+            cat comment_body.md
+            echo "----------------------------------------"
+          fi
