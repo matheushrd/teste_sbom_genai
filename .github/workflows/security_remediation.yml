@@ -72,7 +72,7 @@ jobs:
 
       - name: 4.3.1. Verificar arquivos existentes
         run: ls -R ./app |
-          cat cyclonedx.json
+          cat ./app/cyclonedx.json
 
       # - name: 5. Escanear SBOM com Trivy
       #   id: vulerability_scan
