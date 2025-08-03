@@ -65,12 +65,13 @@ jobs:
           ./cyclonedx-cli validate --input-file ./app/cyclonedx.json
 
       - name: 5. Escanear SBOM com Trivy
-        # Este passo já estava correto e não precisa de alterações
         id: trivy_scan
         uses: aquasecurity/trivy-action@master
         with:
+          # Adicione esta linha para apontar para o arquivo SBOM correto
+          input: './app/cyclonedx.json'
+          
           scan-type: sbom
-          input: ./app/cyclonedx.json
           format: json
           output: trivy-results.json
           severity: 'HIGH,CRITICAL'
