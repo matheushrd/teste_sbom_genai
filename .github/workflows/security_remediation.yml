@@ -75,7 +75,13 @@ jobs:
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
 
       - name: 5.2 Escanear SBOM com Trivy
+        id: vulnerability_scan
+        continue-on-error: true
         run: |
+          # Executa o scan e salva o resultado em formato JSON para processamento
+          trivy sbom ./app/cyclonedx.json --format json --output trivy-results.json --severity MEDIUM,HIGH,CRITICAL
+          
+          # Também executa em formato table para exibição
           trivy sbom ./app/cyclonedx.json --exit-code 1 --severity MEDIUM,HIGH,CRITICAL --format table
 
           
