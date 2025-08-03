@@ -65,9 +65,12 @@ jobs:
           ./cyclonedx-cli validate --input-file ./app/cyclonedx.json
 
       - name: 5. Escanear SBOM com OSV-Scanner
-        uses: google/osv-scanner-action@v1
+        uses: google/osv-scanner-action@v1.7.0
+        id: osv_scan
         with:
           sbom: "./app/cyclonedx.json"
+          format: "json"
+          output: "osv-results.json"
 
       - name: 6. Gemini sugere e aplica a correção com OSV
         id: genai_fix
