@@ -11,44 +11,40 @@ permissions:
 jobs:
   scan-and-remediate:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./app
 
     steps:
-    
       - name: 1. Checkout do código-fonte
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: 2. Ler configuração do pipeline
+      - name: 2. Instalar yq para ler YAML
+        run: sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 && sudo chmod a+x /usr/local/bin/yq
+
+      - name: 3. Ler configuração do pipeline
         id: config
         run: |
-          echo "python_version=$(yq '.python_version' ../ci_config.yml)" >> "$GITHUB_OUTPUT"
-          echo "requirements_file=$(yq '.requirements_files[0]' ../ci_config.yml)" >> "$GITHUB_OUTPUT"
-          echo "test_requirements_file=$(yq '.requirements_files[1]' ../ci_config.yml)" >> "$GITHUB_OUTPUT"
+          echo "python_version=$(yq '.python_version' ci_config.yml)" >> "$GITHUB_OUTPUT"
+          echo "requirements_file=$(yq '.requirements_files[0]' ci_config.yml)" >> "$GITHUB_OUTPUT"
+          echo "test_requirements_file=$(yq '.requirements_files[1]' ci_config.yml)" >> "$GITHUB_OUTPUT"
 
-      - name: 2.5. Rodar testes antes da verificação
-        run: |
-          pip install -r ${{ steps.config.outputs.test_requirements_file }}
-          pytest tests/
-
-      - name: 3. Setup do ambiente Python
+      - name: 4. Setup do ambiente Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ steps.config.outputs.python_version }}
           cache: 'pip'
           cache-dependency-path: app/${{ steps.config.outputs.requirements_file }}
 
-      - name: 4. Instalar dependências e gerar SBOM real
+      - name: 5. Instalar dependências e rodar testes iniciais
+        id: initial_tests
         run: |
-          pip install -r ${{ steps.config.outputs.requirements_file }}
-          pip freeze > bom.txt  # cria ./app/bom.txt
+          pip install -r app/${{ steps.config.outputs.requirements_file }}
+          pip install -r app/${{ steps.config.outputs.test_requirements_file }}
+          pytest app/tests/
 
-      - name: 5. Escanear dependências com Trivy (modo filesystem)
+      - name: 6. Escanear dependências com Trivy
         id: trivy_scan
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.20.0
         with:
           scan-type: 'fs'
           scan-ref: './app'
@@ -56,12 +52,12 @@ jobs:
           output: 'trivy-results.json'
           severity: 'HIGH,CRITICAL'
           ignore-unfixed: true
-          continue-on-error: true
+          exit-code: '1' # Garante que o outcome seja 'failure' se vulnerabilidades forem encontradas
+        continue-on-error: true
 
-
-      - name: 6. Gemini sugere e aplica a correção
+      - name: 7. Gemini sugere e aplica a correção
         id: genai_fix
-        if: steps.trivy_scan.outcome == 'failure'
+        if: steps.initial_tests.outcome == 'success' && steps.trivy_scan.outcome == 'failure'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           REQUIREMENTS_FILE_PATH: app/${{ steps.config.outputs.requirements_file }}
@@ -71,50 +67,69 @@ jobs:
           import os, json, google.generativeai as genai, subprocess
 
           requirements_path = os.environ["REQUIREMENTS_FILE_PATH"]
+          trivy_results_path = 'trivy-results.json'
+          
           try:
-              with open('trivy-results.json', 'r') as f: data = json.load(f)
-              vulnerability = data[0]['Vulnerabilities'][0]
-              pkg_name, installed_version, cve_id = vulnerability['PkgName'], vulnerability['InstalledVersion'], vulnerability['VulnerabilityID']
+              with open(trivy_results_path, 'r') as f:
+                  results = json.load(f)
+              
+              # O output do trivy-action pode ser uma lista de "targets"
+              if not results or "Results" not in results[0] or not results[0]["Results"]:
+                  print("Nenhuma vulnerabilidade encontrada no formato esperado.")
+                  exit(0)
+
+              vulnerability = results[0]['Results'][0]['Vulnerabilities'][0]
+              pkg_name = vulnerability['PkgName']
+              installed_version = vulnerability['InstalledVersion']
+              cve_id = vulnerability['VulnerabilityID']
               print(f"Vulnerabilidade encontrada: {cve_id} em {pkg_name}=={installed_version}")
-          except (IOError, IndexError, KeyError):
-              print("Nenhuma vulnerabilidade crítica encontrada."); exit(0)
+
+          except (IOError, IndexError, KeyError, TypeError) as e:
+              print(f"Nenhuma vulnerabilidade crítica encontrada ou erro ao processar o arquivo de resultados: {e}");
+              exit(0)
 
           original_req_line = ""
           with open(requirements_path, 'r') as f:
               for line in f:
-                  if line.strip().startswith(pkg_name): original_req_line = line.strip(); break
+                  if line.strip().lower().startswith(pkg_name.lower()):
+                      original_req_line = line.strip()
+                      break
+          
           if not original_req_line:
-              print(f"Biblioteca {pkg_name} não encontrada."); exit(1)
+              print(f"Biblioteca {pkg_name} não encontrada em {requirements_path}.");
+              exit(1)
 
-          prompt = f"Analisando um projeto Python, a vulnerabilidade '{cve_id}' foi encontrada na biblioteca '{pkg_name}', versão '{installed_version}'. O arquivo '{requirements_path}' original contém a linha: '{original_req_line}'. Qual é a menor atualização de versão para '{pkg_name}' que corrige essa falha e respeita a regra de versionamento original? Responda APENAS com a nova linha para o arquivo de requirements."
+          prompt = f"Analisando um projeto Python, a vulnerabilidade '{cve_id}' foi encontrada na biblioteca '{pkg_name}', versão '{installed_version}'. O arquivo '{os.path.basename(requirements_path)}' original contém a linha: '{original_req_line}'. Qual é a menor atualização de versão para '{pkg_name}' que corrige essa falha e respeita a regra de versionamento original (ex: se for '==', mantenha; se for '~=', atualize)? Responda APENAS com a nova linha para o arquivo de requirements."
+          
           genai.configure(api_key=os.environ["GEMINI_API_KEY"])
           model = genai.GenerativeModel('gemini-1.5-pro-latest')
           response = model.generate_content(prompt)
-          corrected_line = response.text.strip()
+          corrected_line = response.text.strip().replace("`", "")
+          
           print(f"Gemini sugeriu a correção: '{corrected_line}'")
 
-          subprocess.run(["sed", "-i", f"s|{original_req_line}|{corrected_line}|g", requirements_path])
+          # Usando sed para substituir a linha no arquivo de requirements
+          subprocess.run(["sed", "-i", f"s|{original_req_line}|{corrected_line}|g", requirements_path], check=True)
 
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f"commit_message=fix(bot): upgrade {pkg_name} to remediate {cve_id}\n")
           EOF
 
-      - name: 7. Instalar dependências corrigidas e de teste
-        id: tests
+      - name: 8. Instalar dependências corrigidas e testar novamente
+        id: final_tests
         if: steps.genai_fix.outputs.commit_message != ''
         run: |
           echo "Instalando dependências corrigidas..."
-          pip install -r ${{ steps.config.outputs.requirements_file }}
+          pip install -r app/${{ steps.config.outputs.requirements_file }}
           echo "Instalando dependências de teste..."
-          pip install -r ${{ steps.config.outputs.test_requirements_file }}
-          echo "Rodando a suíte de testes..."
-          pytest tests/
+          pip install -r app/${{ steps.config.outputs.test_requirements_file }}
+          echo "Rodando a suíte de testes com a correção..."
+          pytest app/tests/
 
-      - name: 8. Commitar e Empurrar a Correção para o PR
-        if: steps.tests.outcome == 'success'
+      - name: 9. Commitar e Empurrar a Correção para o PR
+        if: steps.final_tests.outcome == 'success' && steps.genai_fix.outputs.commit_message != ''
         run: |
           git config --global user.name 'GenAI Security Bot'
           git config --global user.email 'bot@users.noreply.github.com'
           git commit -am "${{ steps.genai_fix.outputs.commit_message }}"
           git push
-        working-directory: .
