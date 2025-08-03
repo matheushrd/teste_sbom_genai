@@ -64,13 +64,16 @@ jobs:
           # Executa a validação no seu arquivo SBOM
           ./cyclonedx-cli validate --input-file ./app/cyclonedx.json
 
-      - name: 5. Escanear SBOM com OSV-Scanner
-        uses: google/osv-scanner-action@v1.7.0
-        id: osv_scan
+      - name: 5. Escanear SBOM com Grype
+        uses: anchore/grype-action@v3
         with:
-          sbom: "./app/cyclonedx.json"
-          format: "json"
-          output: "osv-results.json"
+          # Aponta diretamente para o arquivo SBOM a ser escaneado
+          sbom: ./app/cyclonedx.json
+          
+          # Falha o workflow se encontrar vulnerabilidades altas ou críticas
+          fail-on-severity: 'high, critical'
+          
+
 
       - name: 6. Gemini sugere e aplica a correção com OSV
         id: genai_fix
