@@ -615,12 +615,3 @@ jobs:
           *Para mais detalhes, consulte os logs do workflow.*
           EOF
           
-          # Tenta comentar no PR
-          if gh pr comment ${{ github.event.pull_request.number }} --body-file comment_body.md; then
-            echo "✅ Comentário adicionado ao PR com sucesso!"
-          else
-            echo "⚠️ Não foi possível comentar no PR. Mostrando resumo nos logs:"
-            echo "----------------------------------------"
-            cat comment_body.md
-            echo "----------------------------------------"
-          fi
