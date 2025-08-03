@@ -510,31 +510,105 @@ jobs:
           fi
 
       - name: 9. Commitar e Empurrar a Correção
-        if: steps.tests.outcome == 'success' && steps.verify_fix.outcome == 'success'
+        if: steps.tests.outcome == 'success' && steps.verify_fix.outputs.fix_successful == 'true'
         run: |
+          echo "=== Preparando commit das correções de segurança ==="
+          
+          # Configura o git user
           git config --global user.name 'GenAI Security Bot'
           git config --global user.email 'bot@users.noreply.github.com'
+          
+          # Debug: mostra o estado atual do git
+          echo "Estado atual do git:"
+          git status
+          echo "Branch atual:"
+          git branch -a
+          echo "Referência HEAD:"
+          git log --oneline -1
+          
+          # Verifica se estamos em detached HEAD e corrige
+          if git symbolic-ref HEAD >/dev/null 2>&1; then
+            echo "✅ Estamos em uma branch normal"
+            current_branch=$(git symbolic-ref --short HEAD)
+            echo "Branch atual: $current_branch"
+          else
+            echo "⚠️ Estamos em detached HEAD, criando branch temporária"
+            
+            # Pega o nome da branch do PR
+            pr_branch="${{ github.event.pull_request.head.ref }}"
+            echo "Branch do PR: $pr_branch"
+            
+            # Checkout para a branch do PR
+            git checkout -b "$pr_branch" || git checkout "$pr_branch"
+            echo "✅ Criada/checkout para branch: $pr_branch"
+          fi
+          
+          # Verifica se há mudanças para commitar
+          if git diff --quiet ${{ steps.config.outputs.requirements_file }}; then
+            echo "⚠️ Nenhuma mudança detectada no ${{ steps.config.outputs.requirements_file }}"
+            echo "Comparando com backup original:"
+            if [ -f "requirements_original_backup.txt" ]; then
+              diff requirements_original_backup.txt ${{ steps.config.outputs.requirements_file }} || echo "Há diferenças detectadas"
+            fi
+          else
+            echo "✅ Mudanças detectadas no ${{ steps.config.outputs.requirements_file }}"
+          fi
+          
+          # Adiciona as mudanças
           git add ${{ steps.config.outputs.requirements_file }}
-          git commit -m "${{ steps.genai_fix.outputs.commit_message }}"
-          git push
+          
+          # Verifica se há algo para commitar
+          if git diff --cached --quiet; then
+            echo "❌ Nenhuma mudança staged para commit"
+            echo "Listando arquivos modificados:"
+            git status --porcelain
+            exit 1
+          fi
+          
+          # Faz o commit
+          commit_message="${{ steps.genai_fix.outputs.commit_message }}"
+          echo "Fazendo commit com mensagem: $commit_message"
+          git commit -m "$commit_message"
+          
+          # Faz o push
+          echo "Fazendo push das mudanças..."
+          
+          # Se estávamos em detached HEAD, usa a branch do PR
+          if [ -n "$pr_branch" ]; then
+            echo "Fazendo push para branch do PR: $pr_branch"
+            git push origin "$pr_branch"
+          else
+            echo "Fazendo push para branch atual: $current_branch"
+            git push origin "$current_branch"
+          fi
+          
+          echo "✅ Correções commitadas e enviadas com sucesso!"
 
       - name: 10. Comentar no PR sobre a correção
         if: github.event_name == 'pull_request' && steps.tests.outcome == 'success'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const message = `🔒 **Correção de Segurança Aplicada Automaticamente**
-            
-            Uma vulnerabilidade foi detectada e corrigida automaticamente:
-            - **Commit**: ${{ steps.genai_fix.outputs.commit_message }}
-            - **Status dos Testes**: ✅ Aprovado
-            - **Verificação de Segurança**: ${{ steps.verify_fix.outcome == 'success' && '✅ Vulnerabilidade corrigida' || '⚠️ Necessita revisão manual' }}
-            
-            A correção foi aplicada pelo GenAI Security Bot.`;
-            
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: message
-            });
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Determina o status da verificação de segurança
+          if [ "${{ steps.verify_fix.outputs.fix_successful }}" = "true" ]; then
+            security_status="✅ Vulnerabilidade corrigida"
+          else
+            security_status="⚠️ Necessita revisão manual"
+          fi
+          
+          # Cria a mensagem do comentário
+          cat > comment_body.md << 'EOF'
+          🔒 **Correção de Segurança Aplicada Automaticamente**
+          
+          Uma vulnerabilidade foi detectada e corrigida automaticamente:
+          - **Commit**: ${{ steps.genai_fix.outputs.commit_message }}
+          - **Packages Corrigidos**: ${{ steps.genai_fix.outputs.packages_fixed }}
+          - **Vulnerabilidades Processadas**: ${{ steps.genai_fix.outputs.vulnerabilities_fixed }}
+          - **Status dos Testes**: ✅ Aprovado
+          - **Verificação de Segurança**: ${security_status}
+          
+          A correção foi aplicada pelo GenAI Security Bot.
+          EOF
+          
+          # Usa gh CLI para comentar no PR
+          gh pr comment ${{ github.event.pull_request.number }} --body-file comment_body.md
