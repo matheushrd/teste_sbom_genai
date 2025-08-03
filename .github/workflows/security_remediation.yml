@@ -64,30 +64,11 @@ jobs:
           # Executa a validação no seu arquivo SBOM
           ./cyclonedx-cli validate --input-file ./app/cyclonedx.json
 
-      - name: 4.3. Carregar SBOM como Artefato
-        uses: actions/upload-artifact@v4
-        with:
-          name: sbom-artifact # Nome correto para o upload
-          path: ./app/cyclonedx.json
-
       - name: 4.3.1. Verificar arquivos existentes
-        # CORRIGIDO: Sintaxe correta para múltiplos comandos
         run: |
           echo "Verificando o conteúdo antes do upload:"
           ls -R ./app
           cat ./app/cyclonedx.json
-
-      - name: 5.1. Baixar Artefato do SBOM
-        uses: actions/download-artifact@v4
-        with:
-          # CORRIGIDO: Nome idêntico ao do upload
-          name: sbom-artifact
-          path: ./app
-
-      - name: 5.1.1. Verificar arquivos existentes após download
-        run: |
-          echo "Verificando o conteúdo após o download:"
-          ls -R ./app
 
       - name: 5.2. Escanear SBOM com Grype
         id: vulerability_scan
