@@ -72,9 +72,7 @@ jobs:
 
       - name: 5.1 Instalar Trivy
         run: |
-          # Instala o Trivy diretamente
-          wget -qO- https://github.com/aquasecurity/trivy/releases/latest/download/trivy_Linux-64bit.tar.gz | tar xz
-          sudo mv trivy /usr/local/bin/
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
 
       - name: 5.2 Escanear SBOM com Trivy
         run: |
