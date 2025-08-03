@@ -80,7 +80,7 @@ jobs:
         id: vulerability_scan
         uses: anchore/scan-action@v6
         with:
-          sbom: '/app/cyclonedx.json'
+          sbom: './app/cyclonedx.json'
           fail-on-severity: 'medium'
           
       - name: 6. Gemini sugere e aplica a correção com OSV
