@@ -111,6 +111,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           REQUIREMENTS_FILE_PATH: ${{ steps.config.outputs.requirements_file }}
+          GEMINI_VERSION: ${{ secrets.GEMINI_VERSION }}
         run: |
           pip install google-generativeai
           python - << 'EOF'
