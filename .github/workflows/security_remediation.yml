@@ -41,22 +41,26 @@ jobs:
           cache: 'pip'
           cache-dependency-path: app/${{ steps.config.outputs.requirements_file }}
 
-      - name: 4. Instalar dependências e gerar SBOM real
+      - name: 4. Instalar dependências
         run: |
-          mkdir -p app
+          # Apenas instala as dependências. O 'pip freeze' não é necessário.
           pip install -r ${{ steps.config.outputs.requirements_file }}
-          pip freeze > ${{ github.workspace }}/app/bom.txt  # cria ./app/bom.txt
+          pip install cyclonedx-bom # Instala a ferramenta para a próxima etapa
 
       - name: 4.1 Gerar SBOM com CycloneDX
         run: |
-          pip install cyclonedx-bom
+          # Cria o diretório e gera o SBOM diretamente do requirements.txt
+          mkdir -p app
           cyclonedx-py requirements -i ${{ steps.config.outputs.requirements_file }} -o ./app/cyclonedx.json
 
       - name: 4.2 Validar SBOM
-        run: |
-          cyclonedx-py validate ./app/cyclonedx.json
+        # Usa a action oficial para validação, pois a lib não possui o comando 'validate'
+        uses: CycloneDX/gh-action-validation@v1
+        with:
+          bom-location: './app/cyclonedx.json'
 
       - name: 5. Escanear SBOM com Trivy
+        # Este passo já estava correto e não precisa de alterações
         id: trivy_scan
         uses: aquasecurity/trivy-action@master
         with:
@@ -64,7 +68,7 @@ jobs:
           input: ./app/cyclonedx.json
           format: json
           output: trivy-results.json
-          severity: HIGH,CRITICAL
+          severity: 'HIGH,CRITICAL'
           ignore-unfixed: true
 
 
