@@ -1,5 +1,9 @@
 # Pipeline de Segurança DevSecOps com GenAI
 
+[![Me Pague um Café](https://img.shields.io/badge/-Me%20Pague%20um%20Caf%C3%A9-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://mepagaumcafe.com.br/matheushrd)
+
+![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white)
+
 ## 1. Visão Geral
 
 Este projeto implementa uma pipeline de CI/CD (Integração Contínua/Entrega Contínua) com foco em segurança (DevSecOps) para aplicações Python. O objetivo principal é automatizar a detecção e a remediação de vulnerabilidades em dependências de software (ataques de cadeia de suprimentos), utilizando uma abordagem moderna que inclui a geração de SBOM (Software Bill of Materials), escaneamento de vulnerabilidades com Trivy e correção automática com o auxílio de Inteligência Artificial Generativa (Google Gemini).
@@ -210,7 +214,7 @@ A pipeline gera logs detalhados incluindo:
 - **Testes Obrigatórios:** Pipeline falha se testes não passarem após correção
 - **Compatibilidade:** Focado em projetos Python com requirements.txt
 - **Rate Limits:** Sujeito aos limites de API do Google Gemini
-
+sot
 ---
 
 **🔒 Pipeline DevSecOps com IA - Mantendo seu código seguro automaticamente!**
