@@ -1,0 +1,10 @@
+# Arquivo de configuração para o pipeline de CI/CD
+
+# Versão do Python a ser utilizada nos jobs
+python_version: '3.10'
+
+# Lista de arquivos de dependências a serem instalados
+# O workflow usará o primeiro da lista para o scan de segurança
+requirements_files:
+  - 'requirements.txt'
+  - 'requirements_test.txt'

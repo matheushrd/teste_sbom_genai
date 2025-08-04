@@ -1,0 +1,617 @@
+name: GenAI Security Auto-Remediation on PR
+
+on:
+  pull_request:
+    branches: ['main']
+    types: [opened, synchronize]
+
+permissions:
+  contents: write
+
+jobs:
+  scan-and-remediate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./app
+
+    steps:
+    
+      - name: 1. Checkout do código-fonte
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: 2. Ler configuração do pipeline
+        id: config
+        run: |
+          echo "python_version=$(yq '.python_version' ../ci_config.yml)" >> "$GITHUB_OUTPUT"
+          echo "requirements_file=$(yq '.requirements_files[0]' ../ci_config.yml)" >> "$GITHUB_OUTPUT"
+          echo "test_requirements_file=$(yq '.requirements_files[1]' ../ci_config.yml)" >> "$GITHUB_OUTPUT"
+
+      - name: 2.5. Rodar testes antes da verificação
+        run: |
+          pip install -r ${{ steps.config.outputs.test_requirements_file }}
+          pytest tests/
+
+      - name: 3. Setup do ambiente Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.config.outputs.python_version }}
+          cache: 'pip'
+          cache-dependency-path: app/${{ steps.config.outputs.requirements_file }}
+
+      - name: 4. Instalar dependências
+        run: |
+          # Apenas instala as dependências. O 'pip freeze' não é necessário.
+          pip install -r ${{ steps.config.outputs.requirements_file }}
+          pip install cyclonedx-bom # Instala a ferramenta para a próxima etapa
+
+      - name: 4.1 Gerar SBOM com CycloneDX
+        run: |
+          # Cria o diretório e gera o SBOM diretamente do requirements.txt
+          mkdir -p app
+          cyclonedx-py requirements -i ${{ steps.config.outputs.requirements_file }} -o ./app/cyclonedx.json
+
+      - name: 4.2 Validar SBOM (Método Manual)
+        run: |
+          # Baixa a ferramenta de linha de comando (CLI) do CycloneDX
+          curl -L -o cyclonedx-cli https://github.com/CycloneDX/cyclonedx-cli/releases/latest/download/cyclonedx-linux-x64
+
+          # Dá permissão de execução para a ferramenta
+          chmod +x cyclonedx-cli
+
+          # Executa a validação no seu arquivo SBOM
+          ./cyclonedx-cli validate --input-file ./app/cyclonedx.json
+
+      - name: 4.3.1. Verificar arquivos existentes
+        run: |
+          echo "Verificando o conteúdo antes do upload:"
+          ls -R ./app
+          cat ./app/cyclonedx.json
+
+      - name: 5.1 Instalar Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: 5.2 Escanear SBOM com Trivy
+        id: vulnerability_scan
+        continue-on-error: true
+        run: |
+          # Executa o scan e salva o resultado em formato JSON para processamento
+          trivy sbom ./app/cyclonedx.json --format json --output trivy-results.json --severity MEDIUM,HIGH,CRITICAL
+          
+          # Também executa em formato table para exibição
+          trivy sbom ./app/cyclonedx.json --exit-code 1 --severity MEDIUM,HIGH,CRITICAL --format table
+
+      - name: 5.3. Verificar arquivos existentes
+        run: |
+          echo "Verificando o conteúdo após o escaneamento:"
+          echo "Listando arquivos no diretório app/:"
+          ls -la ./
+          echo "Conteúdo do arquivo requirements.txt:"
+          if [ -f "${{ steps.config.outputs.requirements_file }}" ]; then
+            cat "${{ steps.config.outputs.requirements_file }}"
+          else
+            echo "Arquivo ${{ steps.config.outputs.requirements_file }} não encontrado!"
+          fi
+          echo "Verificando se trivy-results.json foi criado:"
+          if [ -f "trivy-results.json" ]; then
+            echo "✅ trivy-results.json foi criado com sucesso"
+            echo "Primeiras linhas do arquivo:"
+            head -20 trivy-results.json
+          else
+            echo "❌ trivy-results.json não foi encontrado"
+          fi
+          
+
+      - name: 6. Gemini sugere e aplica a correção com Trivy
+        id: genai_fix
+        if: steps.vulnerability_scan.outcome == 'failure'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          REQUIREMENTS_FILE_PATH: ${{ steps.config.outputs.requirements_file }}
+          GEMINI_VERSION: ${{ secrets.GEMINI_VERSION }}
+        run: |
+          pip install google-generativeai
+          python - << 'EOF'
+          import os, json, google.generativeai as genai, subprocess, re
+
+          requirements_path = os.environ["REQUIREMENTS_FILE_PATH"]
+          vulnerabilities_found = []
+
+          print(f"Procurando arquivo de requisitos em: {requirements_path}")
+          print(f"Diretório atual: {os.getcwd()}")
+          print(f"Arquivos no diretório: {os.listdir('.')}")
+
+          try:
+              # Lê o resultado do Trivy em formato JSON
+              with open('trivy-results.json', 'r') as f: 
+                  data = json.load(f)
+              
+              print(f"Estrutura do JSON Trivy: {list(data.keys())}")
+              
+              # Processa TODAS as vulnerabilidades encontradas pelo Trivy
+              for result in data.get('Results', []):
+                  print(f"Processando resultado do tipo: {result.get('Type')}")
+                  
+                  if result.get('Type') == 'python-pkg' and result.get('Vulnerabilities'):
+                      for vulnerability in result['Vulnerabilities']:
+                          vuln_data = {
+                              'pkg_name': vulnerability.get('PkgName'),
+                              'installed_version': vulnerability.get('InstalledVersion'),
+                              'cve_id': vulnerability.get('VulnerabilityID'),
+                              'fixed_version': vulnerability.get('FixedVersion', ''),
+                              'severity': vulnerability.get('Severity', 'UNKNOWN'),
+                              'title': vulnerability.get('Title', ''),
+                              'description': vulnerability.get('Description', '')
+                          }
+                          vulnerabilities_found.append(vuln_data)
+                          print(f"Vulnerabilidade encontrada: {vuln_data['cve_id']} em {vuln_data['pkg_name']}=={vuln_data['installed_version']} (Severidade: {vuln_data['severity']})")
+                          if vuln_data['fixed_version']:
+                              print(f"  → Versão corrigida disponível: {vuln_data['fixed_version']}")
+                      
+          except (IOError, IndexError, KeyError, TypeError) as e:
+              print(f"Erro ao processar resultados do Trivy: {e}")
+              try:
+                  with open('trivy-results.json', 'r') as f:
+                      content = f.read()
+                      print(f"Conteúdo do trivy-results.json: {content[:1000]}...")
+              except:
+                  print("Não foi possível ler o arquivo trivy-results.json")
+              exit(0)
+          
+          if not vulnerabilities_found:
+              print("Nenhuma vulnerabilidade encontrada nos resultados do Trivy.")
+              exit(0)
+
+          print(f"Total de vulnerabilidades encontradas: {len(vulnerabilities_found)}")
+
+          # Verifica se o arquivo requirements.txt existe
+          if not os.path.exists(requirements_path):
+              print(f"Arquivo {requirements_path} não encontrado!")
+              print(f"Arquivos disponíveis: {os.listdir('.')}")
+              exit(1)
+
+          # Lê o conteúdo atual do requirements.txt
+          with open(requirements_path, 'r') as f:
+              original_content = f.read()
+              
+          print(f"Conteúdo original do {requirements_path}:")
+          print(original_content)
+
+          # Agrupa vulnerabilidades por pacote para evitar múltiplas atualizações do mesmo pacote
+          packages_to_fix = {}
+          for vuln in vulnerabilities_found:
+              pkg_name = vuln['pkg_name']
+              if pkg_name not in packages_to_fix:
+                  packages_to_fix[pkg_name] = []
+              packages_to_fix[pkg_name].append(vuln)
+
+          print(f"Pacotes únicos a serem corrigidos: {list(packages_to_fix.keys())}")
+
+          updated_content = original_content
+          fixes_applied = []
+
+          # Processa cada pacote único
+          for pkg_name, pkg_vulnerabilities in packages_to_fix.items():
+              print(f"\n--- Processando pacote: {pkg_name} ---")
+              
+              # Encontra a linha no requirements.txt para este pacote
+              original_req_line = ""
+              for line in original_content.splitlines():
+                  line_stripped = line.strip()
+                  if not line_stripped or line_stripped.startswith('#'):
+                      continue
+                  
+                  if (line_stripped.lower().startswith(pkg_name.lower() + '==') or 
+                      line_stripped.lower().startswith(pkg_name.lower() + '>=') or
+                      line_stripped.lower().startswith(pkg_name.lower() + '~=') or
+                      line_stripped.lower() == pkg_name.lower()):
+                      original_req_line = line_stripped
+                      print(f"Linha encontrada para {pkg_name}: {original_req_line}")
+                      break
+                      
+              if not original_req_line:
+                  print(f"Biblioteca {pkg_name} não encontrada em {requirements_path}. Pulando...")
+                  continue
+
+              # Coleta informações de todas as vulnerabilidades deste pacote
+              cve_list = [v['cve_id'] for v in pkg_vulnerabilities]
+              current_version = pkg_vulnerabilities[0]['installed_version']
+              
+              # Coleta todas as versões corrigidas sugeridas
+              fixed_versions = [v['fixed_version'] for v in pkg_vulnerabilities if v['fixed_version']]
+              fixed_versions_info = ", ".join(set(fixed_versions)) if fixed_versions else "não especificada"
+
+              # Monta o prompt para o Gemini com TODAS as vulnerabilidades do pacote
+              vuln_details = "\n".join([
+                  f"  - {v['cve_id']} (Severidade: {v['severity']}) - Versão corrigida: {v['fixed_version'] or 'não especificada'}"
+                  for v in pkg_vulnerabilities
+              ])
+
+              prompt = f"""Analisando um projeto Python 3.10, foram encontradas as seguintes vulnerabilidades na biblioteca '{pkg_name}', versão '{current_version}':
+
+              {vuln_details}
+
+              O arquivo de dependências contém a linha: '{original_req_line}'
+
+              Considerando TODAS essas vulnerabilidades, qual é a versão mais recente e estável de '{pkg_name}' que:
+              1. Corrige TODAS as vulnerabilidades listadas acima
+              2. É compatível com Python 3.10
+              3. Respeita a regra de versionamento original
+
+              Versões corrigidas sugeridas pelo scanner: {fixed_versions_info}
+
+              IMPORTANTE: 
+              - Sempre use a versão mais alta que resolve todas as vulnerabilidades
+              - Se não houver versão corrigida, responda 'nenhuma versão corrigida disponível'
+              - Sempre use uma versão especificada (ex: '1.2.3') e não um intervalo (ex: '>=1.2.0,<2.0.0')
+
+              Responda APENAS com a nova linha para o arquivo de dependências, sem explicações adicionais."""
+
+              # Chama o Gemini
+              genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+              gemini_version = os.environ.get("GEMINI_VERSION", "gemini-1.5-pro-latest")
+              model = genai.GenerativeModel(gemini_version)
+              response = model.generate_content(prompt)
+              corrected_line = response.text.strip().replace("`", "").replace("```", "")
+              print(f"Gemini sugeriu a correção para {pkg_name}: '{corrected_line}'")
+
+              # Aplica a substituição no conteúdo
+              pattern = re.escape(original_req_line)
+              updated_content = re.sub(f"^{pattern}$", corrected_line, updated_content, flags=re.MULTILINE)
+              
+              fixes_applied.append({
+                  'package': pkg_name,
+                  'original': original_req_line,
+                  'fixed': corrected_line,
+                  'cves': cve_list
+              })
+
+          # Salva o arquivo atualizado
+          with open(requirements_path, 'w') as f:
+              f.write(updated_content)
+
+          print(f"\nArquivo {requirements_path} atualizado!")
+          print(f"Novo conteúdo:")
+          print(updated_content)
+
+          # Gera mensagem de commit com todas as correções
+          if fixes_applied:
+              cve_list = []
+              package_list = []
+              for fix in fixes_applied:
+                  package_list.append(fix['package'])
+                  cve_list.extend(fix['cves'])
+              
+              packages_str = ", ".join(set(package_list))
+              cves_str = ", ".join(set(cve_list))
+              
+              commit_message = f"fix(security): upgrade {packages_str} to remediate {cves_str}"
+              
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"commit_message={commit_message}\n")
+                  f.write(f"vulnerability_fixed=true\n")
+                  f.write(f"packages_fixed={len(fixes_applied)}\n")
+                  f.write(f"vulnerabilities_fixed={len(vulnerabilities_found)}\n")
+                  
+              print(f"Correções aplicadas: {len(fixes_applied)} pacotes, {len(vulnerabilities_found)} vulnerabilidades")
+          else:
+              print("Nenhuma correção foi aplicada.")
+              exit(1)
+          EOF
+
+      - name: 7. Instalar dependências corrigidas e executar testes
+        id: tests
+        if: steps.genai_fix.outputs.vulnerability_fixed == 'true'
+        continue-on-error: true
+        run: |
+          echo "=== Instalando dependências corrigidas pelo Gemini ==="
+          echo "Packages corrigidos: ${{ steps.genai_fix.outputs.packages_fixed }}"
+          echo "Vulnerabilidades corrigidas: ${{ steps.genai_fix.outputs.vulnerabilities_fixed }}"
+          
+          # Mostra o conteúdo atual do requirements.txt (já modificado pelo step 6)
+          echo "Conteúdo do requirements.txt após correções do Gemini:"
+          cat ${{ steps.config.outputs.requirements_file }}
+          
+          # Cria backup antes de tentar instalar (por segurança)
+          cp ${{ steps.config.outputs.requirements_file }} requirements_backup_step7.txt
+          echo "Backup de segurança criado: requirements_backup_step7.txt"
+          
+          # Tenta instalar as dependências exatamente como o Gemini sugeriu
+          echo "Instalando dependências corrigidas..."
+          if pip install -r ${{ steps.config.outputs.requirements_file }}; then
+            echo "✅ Instalação bem-sucedida com as correções do Gemini!"
+            
+            echo "Instalando dependências de teste..."
+            pip install -r ${{ steps.config.outputs.test_requirements_file }}
+            
+            echo "Executando a suíte de testes..."
+            python -m pytest tests/ -v --tb=short
+            
+          else
+            echo "❌ Falha na instalação das dependências corrigidas pelo Gemini."
+            echo "Isso pode indicar que:"
+            echo "1. O Gemini sugeriu versões incompatíveis"
+            echo "2. Há conflitos de dependências"
+            echo "3. Problemas de conectividade com PyPI"
+            
+            echo "Detalhes da falha:"
+            pip install -r ${{ steps.config.outputs.requirements_file }} --verbose
+            
+            echo "Restaurando arquivo original e falhando o step para revisão manual..."
+            if [ -f "requirements_backup_step7.txt" ]; then
+              mv requirements_backup_step7.txt ${{ steps.config.outputs.requirements_file }}
+              echo "Arquivo requirements.txt restaurado ao estado pré-instalação."
+            fi
+            
+            echo "❌ Este step falhou - é necessária revisão manual das correções sugeridas pelo Gemini."
+            exit 1
+          fi
+
+      - name: 8. Verificar se a correção resolveu a vulnerabilidade
+        id: verify_fix
+        if: steps.tests.outcome == 'success'
+        continue-on-error: true
+        run: |
+          echo "=== Verificando se as vulnerabilidades foram corrigidas ==="
+          echo "Packages corrigidos: ${{ steps.genai_fix.outputs.packages_fixed }}"
+          echo "Vulnerabilidades originais: ${{ steps.genai_fix.outputs.vulnerabilities_fixed }}"
+          
+          # Primeiro, vamos verificar se o requirements.txt foi realmente modificado
+          echo "=== DEBUG: Verificando mudanças no requirements.txt ==="
+          echo "Conteúdo atual do requirements.txt:"
+          cat ${{ steps.config.outputs.requirements_file }}
+          
+          echo "Verificando se há backup para comparação..."
+          if [ -f "requirements_original_backup.txt" ]; then
+            echo "Comparando com o backup original:"
+            echo "--- ORIGINAL ---"
+            cat requirements_original_backup.txt
+            echo "--- ATUAL ---"
+            cat ${{ steps.config.outputs.requirements_file }}
+            echo "--- DIFF ---"
+            diff requirements_original_backup.txt ${{ steps.config.outputs.requirements_file }} || true
+          fi
+          
+          # Gera novo SBOM a partir do requirements.txt atualizado
+          echo "=== Gerando novo SBOM com as dependências corrigidas ==="
+          
+          # Remove o SBOM antigo se existir
+          rm -f ./cyclonedx-fixed.json
+          
+          # Gera novo SBOM
+          cyclonedx-py requirements -i ${{ steps.config.outputs.requirements_file }} -o ./cyclonedx-fixed.json
+          
+          echo "SBOM atualizado gerado: cyclonedx-fixed.json"
+          echo "Verificando conteúdo do novo SBOM..."
+          if [ -f "./cyclonedx-fixed.json" ]; then
+            echo "Tamanho do arquivo: $(wc -c < ./cyclonedx-fixed.json) bytes"
+            echo "Primeiras linhas do SBOM:"
+            head -20 ./cyclonedx-fixed.json
+          else
+            echo "❌ ERRO: SBOM não foi gerado!"
+            exit 1
+          fi
+          
+          # Verifica se ainda há vulnerabilidades no novo SBOM
+          echo "=== Escaneando o novo SBOM para verificar vulnerabilidades ==="
+          
+          # Gera resultado em JSON para análise (sem exit-code para não falhar aqui)
+          trivy sbom ./cyclonedx-fixed.json --format json --output trivy-results-fixed.json --severity MEDIUM,HIGH,CRITICAL
+          
+          echo "✅ Scan do SBOM corrigido concluído"
+          
+          # Mostra resultado em formato tabela
+          echo "=== Resultado do scan de segurança após correções ==="
+          trivy sbom ./cyclonedx-fixed.json --format table --severity MEDIUM,HIGH,CRITICAL
+          
+          # Analisa os resultados para verificar se as correções foram efetivas
+          python - << 'EOF'
+          import json
+          import os
+          
+          try:
+              # Carrega os resultados originais
+              with open('trivy-results.json', 'r') as f:
+                  original_results = json.load(f)
+              
+              # Carrega os resultados após correção
+              with open('trivy-results-fixed.json', 'r') as f:
+                  fixed_results = json.load(f)
+              
+              print("=== DEBUG: Estrutura dos arquivos JSON ===")
+              print(f"Arquivo original - chaves: {list(original_results.keys())}")
+              print(f"Arquivo corrigido - chaves: {list(fixed_results.keys())}")
+              
+              # Conta vulnerabilidades originais
+              original_vulns = []
+              for result in original_results.get('Results', []):
+                  if result.get('Type') == 'python-pkg' and result.get('Vulnerabilities'):
+                      for vuln in result['Vulnerabilities']:
+                          original_vulns.append({
+                              'cve': vuln.get('VulnerabilityID'),
+                              'package': vuln.get('PkgName'),
+                              'severity': vuln.get('Severity')
+                          })
+              
+              # Conta vulnerabilidades restantes
+              remaining_vulns = []
+              for result in fixed_results.get('Results', []):
+                  if result.get('Type') == 'python-pkg' and result.get('Vulnerabilities'):
+                      for vuln in result['Vulnerabilities']:
+                          remaining_vulns.append({
+                              'cve': vuln.get('VulnerabilityID'),
+                              'package': vuln.get('PkgName'),
+                              'severity': vuln.get('Severity')
+                          })
+              
+              print(f"=== ANÁLISE DE CORREÇÃO ===")
+              print(f"Vulnerabilidades originais: {len(original_vulns)}")
+              print(f"Vulnerabilidades restantes: {len(remaining_vulns)}")
+              print(f"Vulnerabilidades corrigidas: {len(original_vulns) - len(remaining_vulns)}")
+              
+              if original_vulns:
+                  success_rate = ((len(original_vulns) - len(remaining_vulns)) / len(original_vulns)) * 100
+                  print(f"Taxa de sucesso: {success_rate:.1f}%")
+              
+              # Lista vulnerabilidades que ainda permanecem
+              if remaining_vulns:
+                  print(f"\n⚠️ Vulnerabilidades que ainda permanecem:")
+                  for vuln in remaining_vulns:
+                      print(f"  - {vuln['cve']} em {vuln['package']} (Severidade: {vuln['severity']})")
+                  
+                  # Define output indicando que ainda há vulnerabilidades
+                  with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                      f.write(f"vulnerabilities_remaining={len(remaining_vulns)}\n")
+                      f.write(f"all_vulnerabilities_fixed=false\n")
+                      f.write(f"fix_successful=false\n")
+              else:
+                  print(f"\n✅ Todas as vulnerabilidades foram corrigidas com sucesso!")
+                  with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                      f.write(f"vulnerabilities_remaining=0\n")
+                      f.write(f"all_vulnerabilities_fixed=true\n")
+                      f.write(f"fix_successful=true\n")
+              
+              # Lista vulnerabilidades que foram corrigidas
+              if len(original_vulns) > len(remaining_vulns):
+                  remaining_cves = [v['cve'] for v in remaining_vulns]
+                  corrected_vulns = [v for v in original_vulns if v['cve'] not in remaining_cves]
+                  
+                  print(f"\n✅ Vulnerabilidades corrigidas:")
+                  for vuln in corrected_vulns:
+                      print(f"  - {vuln['cve']} em {vuln['package']} (Severidade: {vuln['severity']})")
+          
+          except Exception as e:
+              print(f"Erro ao analisar resultados: {e}")
+              import traceback
+              traceback.print_exc()
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"vulnerabilities_remaining=unknown\n")
+                  f.write(f"all_vulnerabilities_fixed=false\n")
+                  f.write(f"fix_successful=false\n")
+          EOF
+          
+          # Define sucesso/falha baseado no scan final
+          echo "=== Determinando resultado final ==="
+          
+          # Usa o exit code do trivy para determinar se há vulnerabilidades
+          if trivy sbom ./cyclonedx-fixed.json --exit-code 1 --severity MEDIUM,HIGH,CRITICAL --quiet; then
+            # Exit code 0 = sem vulnerabilidades
+            echo "✅ SUCESSO: Nenhuma vulnerabilidade MEDIUM/HIGH/CRITICAL encontrada"
+            echo "As correções do Gemini foram efetivas!"
+            exit 0
+          else
+            # Exit code 1 = vulnerabilidades encontradas
+            echo "❌ FALHA: Ainda há vulnerabilidades MEDIUM/HIGH/CRITICAL após as correções"
+            echo "As sugestões do Gemini não resolveram completamente os problemas"
+            exit 1
+          fi
+
+      - name: 9. Commitar e Empurrar a Correção
+        if: steps.tests.outcome == 'success' && steps.verify_fix.outputs.fix_successful == 'true'
+        run: |
+          echo "=== Preparando commit das correções de segurança ==="
+          
+          # Configura o git user
+          git config --global user.name 'GenAI Security Bot'
+          git config --global user.email 'bot@users.noreply.github.com'
+          
+          # Debug: mostra o estado atual do git
+          echo "Estado atual do git:"
+          git status
+          echo "Branch atual:"
+          git branch -a
+          echo "Referência HEAD:"
+          git log --oneline -1
+          
+          # Verifica se estamos em detached HEAD e corrige
+          if git symbolic-ref HEAD >/dev/null 2>&1; then
+            echo "✅ Estamos em uma branch normal"
+            current_branch=$(git symbolic-ref --short HEAD)
+            echo "Branch atual: $current_branch"
+          else
+            echo "⚠️ Estamos em detached HEAD, criando branch temporária"
+            
+            # Pega o nome da branch do PR
+            pr_branch="${{ github.event.pull_request.head.ref }}"
+            echo "Branch do PR: $pr_branch"
+            
+            # Checkout para a branch do PR
+            git checkout -b "$pr_branch" || git checkout "$pr_branch"
+            echo "✅ Criada/checkout para branch: $pr_branch"
+          fi
+          
+          # Verifica se há mudanças para commitar
+          if git diff --quiet ${{ steps.config.outputs.requirements_file }}; then
+            echo "⚠️ Nenhuma mudança detectada no ${{ steps.config.outputs.requirements_file }}"
+            echo "Comparando com backup original:"
+            if [ -f "requirements_original_backup.txt" ]; then
+              diff requirements_original_backup.txt ${{ steps.config.outputs.requirements_file }} || echo "Há diferenças detectadas"
+            fi
+          else
+            echo "✅ Mudanças detectadas no ${{ steps.config.outputs.requirements_file }}"
+          fi
+          
+          # Adiciona as mudanças
+          git add ${{ steps.config.outputs.requirements_file }}
+          
+          # Verifica se há algo para commitar
+          if git diff --cached --quiet; then
+            echo "❌ Nenhuma mudança staged para commit"
+            echo "Listando arquivos modificados:"
+            git status --porcelain
+            exit 1
+          fi
+          
+          # Faz o commit
+          commit_message="${{ steps.genai_fix.outputs.commit_message }}"
+          echo "Fazendo commit com mensagem: $commit_message"
+          git commit -m "$commit_message"
+          
+          # Faz o push
+          echo "Fazendo push das mudanças..."
+          
+          # Se estávamos em detached HEAD, usa a branch do PR
+          if [ -n "$pr_branch" ]; then
+            echo "Fazendo push para branch do PR: $pr_branch"
+            git push origin "$pr_branch"
+          else
+            echo "Fazendo push para branch atual: $current_branch"
+            git push origin "$current_branch"
+          fi
+          
+          echo "✅ Correções commitadas e enviadas com sucesso!"
+
+      - name: 10. Comentar no PR sobre a correção
+        if: github.event_name == 'pull_request' && steps.tests.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          # Determina o status da verificação de segurança
+          if [ "${{ steps.verify_fix.outputs.fix_successful }}" = "true" ]; then
+            security_status="✅ Vulnerabilidades corrigidas"
+            security_icon="✅"
+          else
+            security_status="⚠️ Necessita revisão manual"
+            security_icon="⚠️"
+          fi
+          
+          # Substitui variáveis no template
+          cat > comment_body.md << EOF
+          🔒 **Correção de Segurança Aplicada Automaticamente**
+          
+          Uma vulnerabilidade foi detectada e corrigida automaticamente:
+          - **Commit:** \`${{ steps.genai_fix.outputs.commit_message }}\`
+          - **Packages Corrigidos:** ${{ steps.genai_fix.outputs.packages_fixed }}
+          - **Vulnerabilidades Processadas:** ${{ steps.genai_fix.outputs.vulnerabilities_fixed }}
+          - **Status dos Testes:** ✅ Aprovado
+          - **Verificação de Segurança:** $security_status
+          
+          $security_icon A correção foi aplicada pelo **GenAI Security Bot**.
+          
+          ---
+          *Para mais detalhes, consulte os logs do workflow.*
+          EOF
+          

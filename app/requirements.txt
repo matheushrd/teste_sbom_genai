@@ -1,0 +1,4 @@
+# Dependências de produção
+# Usaremos uma versão mais antiga do pandas para simular uma vulnerabilidade
+pyyaml==6.0.1
+requests==2.32.4
